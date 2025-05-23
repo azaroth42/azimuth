@@ -1,0 +1,485 @@
+from flask_socketio import emit, join_room, leave_room
+from werkzeug.security import generate_password_hash, check_password_hash
+import entities
+from decorator import commands
+import copy
+import time
+from rich import print
+
+# Azimuth
+# Azaroth's Intelligent MultiUser Textual Habitat
+
+class World:
+    def __init__(self, db, world_id):
+        # sid: object_id
+        self.id = world_id
+        self.active_sids = {}
+        # object_id: object
+        self.active_objects = {}
+        self.db = db
+        self.config = None
+        self.players = {}
+        self.motd = "Welcome to the World"
+        self.config = None
+        self.commands = []
+        self.default_commands = {}
+        self.default_messages = {
+            "fail_visible": "You can't see anything like that here.",
+        }
+
+        self.exit_names = {
+            "n": "north",
+            "s": "south",
+            "e": "east",
+            "w": "west",
+            "ne": "northeast",
+            "nw": "northwest",
+            "se": "southeast",
+            "sw": "southwest",
+            "up": "up",
+            "down": "down"
+        }
+
+        world_config = self.load(self.id)
+        if world_config is not None:
+            self.config = world_config
+        # pre-cache all username:object_ids
+        players = self.db.load(f"{self.id}_players")
+        if players is not None:
+            try:
+                del players["id"]
+                del players["class"]
+            except Exception as e:
+                pass
+            self.players = players
+
+    def get_commands(self, match=None, allow_cached=True):
+        return {}
+
+    def register_commands(self):
+        commands.register_commands()
+
+    def register_active(self, obj):
+        self.active_objects[obj.id] = obj
+
+    def persist_players(self):
+        # for now write players to JSON file
+        players = copy.deepcopy(self.players)
+        players["id"] = f"{self.id}_players"
+        self.save(players)
+
+    def load(self, id, recursive=True):
+        # fetch entity from persistence layer
+        data = self.db.load(id)
+        # bootstrap it up from class name in dict
+        if data and "class" in data:
+            clss = getattr(entities, data["class"])
+            instance = clss(id, self, data, recursive)
+            self.active_objects[id] = instance
+            return instance
+        else:
+            return data
+
+    def save(self, data):
+        self.db.save(data)
+
+    def dump_database(self):
+        for o in self.active_objects.values():
+            if isinstance(o, entities.Player):
+                o.last_location = o.location
+            o._save()
+
+    def get_object(self, id, recursive=True):
+        if id is None:
+            return None
+        elif id in self.active_objects:
+            return self.active_objects[id]
+        else:
+            return self.load(id, recursive)
+
+    def join_room(self, where, who):
+        join_room(where.id, who.connection)
+
+    def leave_room(self, where, who):
+        leave_room(where.id, who.connection)
+
+    def announce(self, msg, where, but=None):
+        if but is not None:
+            emit("message", msg, to=where.id, skip_sid=but.connection)
+        else:
+            emit("message", msg, to=where.id)
+
+    def tell_player(self, who, msg):
+        emit("message", msg, to=who.connection)
+
+    def handle_register(self, sid, data):
+        """Handles player registration."""
+        username = data.get("username")
+        password = data.get("password")
+
+        if not username or not password:
+            return "Registration requires both username and password, please try again."
+
+        # Check if username is already registered using the Redis set
+        if username in self.players:
+            return f"Username '{username}' is already taken, please try another username."
+
+        if username in ["id", "class"]:
+            return f"Username '{username}' is invalid, please try again."
+
+        # --- Create Player Entity ---
+        # Player constructor saves the basic entity to Redis
+        password_hash = generate_password_hash(password)
+        try:
+            new_player = entities.Player(
+                None,
+                self,
+                {
+                    "name": username,
+                    "username": username,
+                    "password_hash": password_hash,
+                },
+            )  # Creates entity with ID
+            new_player.password_hash = password_hash
+            new_player.username = username
+            new_player.last_location = self.get_object(self.config["start_room_id"])
+            new_player._save()
+            self.players[username] = new_player.id
+            self.persist_players()
+
+            print(f"Registered new user: {username} (ID: {new_player.id})")
+            self.login(sid, new_player)
+            return "Registration successful!"
+        except:
+            raise
+            return "Registration failed due to a server error storing metadata."
+
+    def handle_login(self, sid, data):
+        """Handles player login."""
+        username = data.get("username")
+        password = data.get("password")
+
+        if not username or not password:
+            return "Login requires both username and password."
+
+        # Check if already logged in with this sid (HOW??)
+        if sid in self.active_sids:
+            return "Already logged in?!"
+
+        # Check if user is registered in players
+        player_id = self.players[username]
+        if not player_id:
+            return "Username and password do not match."
+
+        player = self.load(player_id)
+        if not isinstance(player, entities.Player):
+            return "Username is not associated with a player object"
+
+        # Check if password matches
+        if not check_password_hash(player.password_hash, password):
+            return "Username and password do not match."
+
+        for ap in self.active_sids.values():
+            if ap == player_id:
+                return f"{username} is already logged in."
+                # FIXME: kick the other copy out?
+
+        # --- Login successful ---
+        print(f"Player '{username}' attempting login with SID {sid}")
+        self.login(sid, player)
+
+    def login(self, sid, player):
+        player.connection = sid
+        self.active_sids[sid] = player.id
+        self.active_objects[player.id] = player
+
+        where = player.last_location
+        if where is None:
+            where_id = self.config["start_room_id"]
+            where = self.get_object(where_id)
+        elif type(where) is str:
+            where = self.get_object(where)
+        print(f"moving to {where}")
+        player.move_to(where)
+        player.tell(f"Welcome back, {player.name}!")
+
+    def on_disconnect(self, sid):
+        player_id = self.active_sids.get(sid)  # Find player ID from active session map
+        player = self.active_objects[player_id]
+
+        # Announce disconnect
+        player.location.announce_all_but(f"{player.name} has disconnected", [player])
+        player.last_location = player.location
+        player.move_to(None)
+
+        # Remove from active caches
+        player.connection = None
+        del self.active_sids[sid]
+        del self.active_objects[player_id]
+        player._save()
+
+    def process_player_command(self, player_id, argstr):
+        player = self.active_objects.get(player_id, None)
+        if player is None:
+            # ????!
+            print(f"Got no player for id {player_id}")
+            return
+
+        player.last_active_time = time.time()
+        ch0 = argstr[0]
+        words = argstr.split()
+        w1 = words[0]
+
+        if argstr in self.exit_names:
+            argstr = self.exit_names[argstr]
+
+        search_order = [
+            player,
+            player.location,
+            *player.contents,
+            *player.location.contents,
+            *player.location.exits.values(),
+            self,
+            *player.command_sets,
+        ]
+
+        if ch0 in ["'", '"']:
+            player.say(argstr[1:])
+        elif w1 == "say":
+            player.say(argstr[4:].strip())
+        elif ch0 in [":", ";"]:
+            player.emote(argstr[1:])
+        elif w1 == "emote":
+            player.emote(argstr[6:].strip())
+        elif ch0 == "|":
+            player.eval(argstr[1:])
+        elif w1 == "eval":
+            player.eval(argstr[5:].strip())
+        elif argstr in self.exit_names.values():
+            exit = player.location.exits.get(argstr,None)
+            if exit is not None:
+                exit.use(player)
+            else:
+                player.tell("There is no such exit here")
+        else:
+            objstr = ' '.join(words[1:])
+            for s in search_order:
+                cmds = s.get_commands(w1)
+                for c in cmds.get(w1, []):
+                    if len(words) == 1 and not any([c['dobj'], c['prep'], c['iobj']]):
+                        c['func'](s, player, prep=None, verb=w1)
+                        return
+                    elif len(words) == 1:
+                        continue
+                    elif c['prep'] is not None:
+                        for p in c['prep']:
+                            if p in objstr:
+                                # Ensure put gong on long bong splits sanely
+                                bits = objstr.split(f" {p} ")
+                                if len(bits) == 2:
+                                    (d, i) = bits
+                                else:
+                                    print(bits)
+                                    player.tell(f"yuck: {bits}")
+                                    return
+                                d = d.strip()
+                                i = i.strip()
+                                if (not c['dobj'] and d) or (c['dobj'] and not d):
+                                    continue
+                                elif (not c['iobj'] and i) or (c['iobj'] and not i):
+                                    continue
+                                else:
+                                    if c['dobj'] == "self":
+                                        if not s.match_object(d, player):
+                                            continue
+                                        else:
+                                            c['func'](s, player, i, prep=p, verb=w1)
+                                            return
+                                    if c['iobj'] == "self":
+                                        if not s.match_object(i, player):
+                                            continue
+                                        else:
+                                            if not d:
+                                                c['func'](s, player, prep=p, verb=w1)
+                                                return
+                                            else:
+                                                c['func'](s, player, d, prep=p, verb=w1)
+                                                return
+                    else:
+                        # no prep, so no iobj
+                        # and also not none ... so must be dobj
+                        if c['dobj'] == 'self' and s.match_object(objstr, player):
+                            c['func'](s, player, prep=None, verb=w1)
+                            return
+
+
+            ### meta
+            # @who, @quit, [@]help
+            # @create, @dig, @desc, @set, @prop, @func, @eval
+
+            ### objects
+            # furniture (sit at/on, stand/leave, say to table)
+
+            ### MUD type commands
+            # hold/wield/wear / stow/unwear
+            # attack, cast, shoot
+            # eat/drink/consume
+
+
+# --- Game World Creation / Initialization ---
+def setup_world(db, world_id):
+    """Checks if the world exists in Redis and creates it if not."""
+
+    world = World(db, world_id)
+    world.register_commands()
+    if world.config is not None:
+        return world
+    else:
+        # Initialize Simple World for now
+
+        print("Initializing game world...")
+
+        # constructor is (id, world, data, recursive)
+        # main data fields: name, description, location, contents
+
+        from entities import Place, Object, Exit, Container
+
+        # Places - Keep track of IDs for linking
+        start_room = Place(
+            None,
+            world,
+            {
+                "name": "The Starting Chamber",
+                "description": "A small, damp stone chamber. It feels like the beginning of an adventure.",
+            },
+        )
+        hallway = Place(
+            None,
+            world,
+            {
+                "name": "Narrow Hallway",
+                "description": "A dark, narrow hallway stretching north and south.",
+            },
+        )
+        treasure_room = Place(
+            None,
+            world,
+            {
+                "name": "Glittering Cave",
+                "description": "A small cave sparkling with veins of quartz. A sturdy chest sits here.",
+            },
+        )
+
+        # Objects - Place them using location_id in constructor
+        sword = Object(
+            None,
+            world,
+            {
+                "name": "rusty sword",
+                "description": "A simple sword, pitted with rust.",
+                "location": start_room.id,
+            },
+        )
+        key = Object(
+            None,
+            world,
+            {
+                "name": "iron key",
+                "description": "A heavy iron key.",
+                "location": hallway.id,
+            },
+        )
+        bread = Object(
+            None,
+            world,
+            {
+                "name": "loaf of bread",
+                "description": "A crusty loaf of bread. Looks edible.",
+                "location": start_room.id,
+            },
+        )
+
+        # Containers
+        chest = Container(
+            None,
+            world,
+            {
+                "name": "sturdy chest",
+                "description": "A solid wooden chest bound with iron.",
+                "location": treasure_room.id,
+            },
+        )
+        gem = Object(
+            None,
+            world,
+            {
+                "name": "shiny gem",
+                "description": "A brightly shining gemstone.",
+                "location": chest.id,
+            },
+        )
+
+        # Exits (Name, Description, Source ID, Destination ID)
+        # Constructor automatically adds exit to source place in Redis
+        n = Exit(
+            None,
+            world,
+            {
+                "name": "north",
+                "description": "A dark opening leads north.",
+                "source": start_room.id,
+                "destination": hallway.id,
+            },
+        )
+        s = Exit(
+            None,
+            world,
+            {
+                "name": "south",
+                "description": "An archway leads back south.",
+                "source": hallway.id,
+                "destination": start_room.id,
+            },
+        )
+        e = Exit(
+            None,
+            world,
+            {
+                "name": "east",
+                "description": "A narrow passage leads east.",
+                "source": hallway.id,
+                "destination": treasure_room.id,
+            },
+        )
+        w = Exit(
+            None,
+            world,
+            {
+                "name": "west",
+                "description": "A passage leads back west.",
+                "source": treasure_room.id,
+                "destination": hallway.id,
+            },
+        )
+
+        for what in [
+            start_room,
+            hallway,
+            treasure_room,
+            sword,
+            key,
+            bread,
+            chest,
+            gem,
+            n,
+            s,
+            e,
+            w,
+        ]:
+            what._save()
+
+        config = {"id": world_id, "start_room_id": start_room.id}
+        world.save(config)
+        world.persist_players()
+        world.config = config
+        return world

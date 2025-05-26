@@ -5,9 +5,15 @@ from decorator import commands
 import copy
 import time
 from rich import print
+import importlib
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Azimuth
 # Azaroth's Intelligent MultiUser Textual Habitat
+
 
 class World:
     def __init__(self, db, world_id):
@@ -19,7 +25,7 @@ class World:
         self.db = db
         self.config = None
         self.players = {}
-        self.motd = "Welcome to the World"
+        self.motd = "Welcome to Azimuth"
         self.config = None
         self.commands = []
         self.default_commands = {}
@@ -37,7 +43,7 @@ class World:
             "se": "southeast",
             "sw": "southwest",
             "up": "up",
-            "down": "down"
+            "down": "down",
         }
 
         world_config = self.load(self.id)
@@ -49,9 +55,28 @@ class World:
             try:
                 del players["id"]
                 del players["class"]
-            except Exception as e:
+            except Exception:
                 pass
             self.players = players
+
+    def import_class(self, objectType):
+        if not objectType:
+            return None
+        if "." not in objectType:
+            objectType = f"entities.{objectType}"
+        (modName, className) = objectType.rsplit(".", 1)
+
+        try:
+            m = importlib.import_module(modName)
+        except ModuleNotFoundError as mnfe:
+            logger.critical(f"Could not find module {modName}: {mnfe}")
+        except Exception as e:
+            logger.critical(f"Failed to import {modName}: {e}")
+        try:
+            parentClass = getattr(m, className)
+        except AttributeError:
+            raise
+        return parentClass
 
     def get_commands(self, match=None, allow_cached=True):
         return {}
@@ -96,6 +121,26 @@ class World:
             return self.active_objects[id]
         else:
             return self.load(id, recursive)
+
+    def get_object_by_name(self, name, clss=None):
+        for what in self.active_objects.values():
+            if (clss is None or isinstance(what, clss)) and what.match_object(name, None):
+                return what
+        # Persistence layer might be able to search too
+        return self.db.get_object_by_name(name, clss)
+
+    def get_object_by_id(self, id, clss=None):
+        if not id:
+            return None
+        elif id in self.active_objects:
+            return self.active_objects[id]
+        else:
+            # search active objects for startswith(id)
+            for what in self.active_objects:
+                if what.startswith(id):
+                    return self.active_objects[what]
+        # Persistence layer might be able to search too
+        return self.db.get_object_by_id(id, clss)
 
     def join_room(self, where, who):
         join_room(where.id, who.connection)
@@ -199,7 +244,6 @@ class World:
             where = self.get_object(where_id)
         elif type(where) is str:
             where = self.get_object(where)
-        print(f"moving to {where}")
         player.move_to(where)
         player.tell(f"Welcome back, {player.name}!")
 
@@ -240,7 +284,6 @@ class World:
             *player.location.contents,
             *player.location.exits.values(),
             self,
-            *player.command_sets,
         ]
 
         if ch0 in ["'", '"']:
@@ -256,26 +299,26 @@ class World:
         elif w1 == "eval":
             player.eval(argstr[5:].strip())
         elif argstr in self.exit_names.values():
-            exit = player.location.exits.get(argstr,None)
+            exit = player.location.exits.get(argstr, None)
             if exit is not None:
                 exit.use(player)
             else:
                 player.tell("There is no such exit here")
         else:
-            objstr = ' '.join(words[1:])
+            argstr = argstr.replace(w1, "", 1).strip()
             for s in search_order:
                 cmds = s.get_commands(w1)
                 for c in cmds.get(w1, []):
-                    if len(words) == 1 and not any([c['dobj'], c['prep'], c['iobj']]):
-                        c['func'](s, player, prep=None, verb=w1)
+                    if len(words) == 1 and not any([c["dobj"], c["prep"], c["iobj"]]):
+                        c["func"](s, player, prep=None, verb=w1)
                         return
                     elif len(words) == 1:
                         continue
-                    elif c['prep'] is not None:
-                        for p in c['prep']:
-                            if p in objstr:
+                    elif c["prep"] is not None:
+                        for p in c["prep"]:
+                            if p in argstr:
                                 # Ensure put gong on long bong splits sanely
-                                bits = objstr.split(f" {p} ")
+                                bits = argstr.split(f" {p} ")
                                 if len(bits) == 2:
                                     (d, i) = bits
                                 else:
@@ -284,34 +327,38 @@ class World:
                                     return
                                 d = d.strip()
                                 i = i.strip()
-                                if (not c['dobj'] and d) or (c['dobj'] and not d):
+                                if (not c["dobj"] and d) or (c["dobj"] and not d):
                                     continue
-                                elif (not c['iobj'] and i) or (c['iobj'] and not i):
+                                elif (not c["iobj"] and i) or (c["iobj"] and not i):
                                     continue
                                 else:
-                                    if c['dobj'] == "self":
+                                    if s == player:
+                                        # allow any * any
+                                        if c["dobj"] == "any" and d and c["iobj"] == "any" and i:
+                                            c["func"](s, player, d, i, prep=p, verb=w1)
+                                            return
+                                    if c["dobj"] == "self":
                                         if not s.match_object(d, player):
                                             continue
                                         else:
-                                            c['func'](s, player, i, prep=p, verb=w1)
+                                            c["func"](s, player, i, prep=p, verb=w1)
                                             return
-                                    if c['iobj'] == "self":
+                                    if c["iobj"] == "self":
                                         if not s.match_object(i, player):
                                             continue
                                         else:
                                             if not d:
-                                                c['func'](s, player, prep=p, verb=w1)
+                                                c["func"](s, player, prep=p, verb=w1)
                                                 return
                                             else:
-                                                c['func'](s, player, d, prep=p, verb=w1)
+                                                c["func"](s, player, d, prep=p, verb=w1)
                                                 return
                     else:
                         # no prep, so no iobj
                         # and also not none ... so must be dobj
-                        if c['dobj'] == 'self' and s.match_object(objstr, player):
-                            c['func'](s, player, prep=None, verb=w1)
+                        if c["dobj"] == "self" and s.match_object(argstr, player):
+                            c["func"](s, player, prep=None, verb=w1)
                             return
-
 
             ### meta
             # @who, @quit, [@]help

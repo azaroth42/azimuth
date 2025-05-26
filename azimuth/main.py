@@ -1,4 +1,4 @@
-from flask import Flask, request
+from flask import Flask, request, render_template
 from flask_socketio import SocketIO, emit
 from persistence import SimpleFileStorage
 from world import setup_world
@@ -18,7 +18,7 @@ if not world:
 # --- Web Handler ---
 @app.route("/")
 def index():
-    return "Hello, World!"
+    return render_template("index.html")
 
 
 # --- SocketIO Event Handlers ---
@@ -48,16 +48,12 @@ def handle_disconnect():
 def handle_command(data):
     """Handles commands received from a logged-in player."""
     sid = request.sid
-    command_text = (
-        data.get("command") if isinstance(data, dict) else data
-    )  # Allow plain string command
+    command_text = data.get("command") if isinstance(data, dict) else data  # Allow plain string command
     if not command_text or not isinstance(command_text, str):
         return
 
     command_text = command_text.strip()
-    player_id = world.active_sids.get(
-        sid, None
-    )  # Get player ID from active session map
+    player_id = world.active_sids.get(sid, None)  # Get player ID from active session map
 
     # --- Handle pre-login commands: login, register ---
     if not player_id:
@@ -70,9 +66,7 @@ def handle_command(data):
         if command_verb == "login" and len(args) == 2:
             msg = world.handle_login(sid, {"username": args[0], "password": args[1]})
         elif command_verb == "register" and len(args) == 3:
-            msg = world.handle_register(
-                sid, {"username": args[0], "password": args[1], "email": args[2]}
-            )
+            msg = world.handle_register(sid, {"username": args[0], "password": args[1], "email": args[2]})
         elif command_verb in ["login", "register"]:
             msg = f"Usage: {command_verb} <username> <password> [email]"
         else:
@@ -85,6 +79,7 @@ def handle_command(data):
 def dump_database():
     print("Exiting, dumping database")
     world.dump_database()
+
 
 # --- Main Execution ---
 if __name__ == "__main__":

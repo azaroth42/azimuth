@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Azimuth MUD Client</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            margin: 0;
+            padding: 20px;
+            background-color: #1a1a1a;
+            color: #00ff00;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #00ff00;
+            padding-bottom: 10px;
+        }
+
+        .game-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+
+        .status-bar {
+            background-color: #333;
+            padding: 10px;
+            border: 1px solid #00ff00;
+            margin-bottom: 10px;
+            border-radius: 3px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .connection-status {
+            color: #ff4444;
+            font-weight: bold;
+        }
+
+        .connection-status.connected {
+            color: #44ff44;
+        }
+
+        .output-container {
+            flex: 1;
+            border: 2px solid #00ff00;
+            border-radius: 5px;
+            background-color: #0a0a0a;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            min-height: 200px;
+        }
+
+        #output {
+            flex: 1;
+            padding: 15px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-size: 14px;
+            line-height: 1.4;
+        }
+
+        .input-container {
+            margin-top: 10px;
+            display: flex;
+            gap: 10px;
+        }
+
+        #commandInput {
+            flex: 1;
+            background-color: #0a0a0a;
+            color: #00ff00;
+            border: 2px solid #00ff00;
+            padding: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            border-radius: 3px;
+            outline: none;
+            resize: vertical;
+            min-height: 40px;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+
+        #commandInput:focus {
+            border-color: #44ff44;
+            box-shadow: 0 0 10px rgba(0, 255, 0, 0.3);
+        }
+
+        .send-button {
+            background-color: #003300;
+            color: #00ff00;
+            border: 2px solid #00ff00;
+            padding: 10px 20px;
+            font-family: 'Courier New', monospace;
+            cursor: pointer;
+            border-radius: 3px;
+            transition: background-color 0.2s;
+        }
+
+        .send-button:hover {
+            background-color: #004400;
+        }
+
+        .send-button:active {
+            background-color: #005500;
+        }
+
+        .clear-button {
+            background-color: #330000;
+            color: #ff4444;
+            border: 2px solid #ff4444;
+            padding: 5px 10px;
+            font-family: 'Courier New', monospace;
+            cursor: pointer;
+            border-radius: 3px;
+            font-size: 12px;
+        }
+
+        .clear-button:hover {
+            background-color: #440000;
+        }
+
+        .message {
+            margin-bottom: 5px;
+            padding: 2px 0;
+        }
+
+        .message.system {
+            color: #ffff00;
+        }
+
+        .message.error {
+            color: #ff4444;
+        }
+
+        .message.info {
+            color: #4444ff;
+        }
+
+        .timestamp {
+            color: #666;
+            font-size: 12px;
+        }
+
+        .help-text {
+            color: #888;
+            font-size: 12px;
+            margin-top: 5px;
+        }
+
+        /* Scrollbar styling */
+        #output::-webkit-scrollbar {
+            width: 12px;
+        }
+
+        #output::-webkit-scrollbar-track {
+            background: #1a1a1a;
+        }
+
+        #output::-webkit-scrollbar-thumb {
+            background: #00ff00;
+            border-radius: 6px;
+        }
+
+        #output::-webkit-scrollbar-thumb:hover {
+            background: #44ff44;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Azimuth MUD</h1>
+    </div>
+
+    <div class="game-container">
+        <div class="status-bar">
+            <div>
+                <span class="connection-status" id="connectionStatus">Disconnected</span>
+                <span id="playerInfo"></span>
+            </div>
+            <div>
+                <button class="clear-button" onclick="clearOutput()">Clear</button>
+            </div>
+        </div>
+
+        <div class="output-container">
+            <div id="output"></div>
+        </div>
+
+        <div class="input-container">
+            <textarea id="commandInput" placeholder="Enter command... (Shift+Enter for new line)" autocomplete="off" rows="1"></textarea>
+            <button class="send-button" onclick="sendCommand()">Send</button>
+        </div>
+
+        <div class="help-text">
+            Press Enter to send commands, Shift+Enter for new lines. Try 'help' for available commands, or 'login &lt;username&gt; &lt;password&gt;' to log in.
+        </div>
+    </div>
+
+    <script>
+        let socket;
+        let connected = false;
+        let commandHistory = [];
+        let historyIndex = -1;
+
+        function init() {
+            // Connect to the SocketIO server
+            socket = io();
+
+            // Connection event handlers
+            socket.on('connect', function() {
+                connected = true;
+                updateConnectionStatus();
+                appendMessage('Connected to server', 'system');
+            });
+
+            socket.on('disconnect', function() {
+                connected = false;
+                updateConnectionStatus();
+                appendMessage('Disconnected from server', 'error');
+            });
+
+            socket.on('connect_error', function(error) {
+                appendMessage('Connection error: ' + error, 'error');
+            });
+
+            // Game message handler
+            socket.on('message', function(data) {
+                appendMessage(data);
+            });
+
+            // Set up input handling
+            const input = document.getElementById('commandInput');
+            input.addEventListener('keydown', function(event) {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault();
+                    sendCommand();
+                } else if (event.key === 'ArrowUp' && !event.shiftKey) {
+                    event.preventDefault();
+                    navigateHistory('up');
+                } else if (event.key === 'ArrowDown' && !event.shiftKey) {
+                    event.preventDefault();
+                    navigateHistory('down');
+                }
+            });
+
+            // Auto-resize textarea based on content
+            input.addEventListener('input', function() {
+                this.style.height = 'auto';
+                this.style.height = Math.min(this.scrollHeight, 150) + 'px';
+            });
+
+            // Focus the input field
+            input.focus();
+        }
+
+        function updateConnectionStatus() {
+            const statusElement = document.getElementById('connectionStatus');
+            if (connected) {
+                statusElement.textContent = 'Connected';
+                statusElement.classList.add('connected');
+            } else {
+                statusElement.textContent = 'Disconnected';
+                statusElement.classList.remove('connected');
+            }
+        }
+
+        function appendMessage(message, type = 'normal') {
+            const output = document.getElementById('output');
+            const messageElement = document.createElement('div');
+            messageElement.className = 'message' + (type !== 'normal' ? ' ' + type : '');
+            
+            const timestamp = new Date().toLocaleTimeString();
+            const timestampSpan = document.createElement('span');
+            timestampSpan.className = 'timestamp';
+            timestampSpan.textContent = '[' + timestamp + '] ';
+            
+            messageElement.appendChild(timestampSpan);
+            messageElement.appendChild(document.createTextNode(message));
+            
+            output.appendChild(messageElement);
+            output.scrollTop = output.scrollHeight;
+        }
+
+        function sendCommand() {
+            const input = document.getElementById('commandInput');
+            const command = input.value.trim();
+            
+            if (!command) return;
+            
+            if (!connected) {
+                appendMessage('Not connected to server', 'error');
+                return;
+            }
+
+            // Add to history
+            commandHistory.unshift(command);
+            if (commandHistory.length > 50) {
+                commandHistory.pop();
+            }
+            historyIndex = -1;
+
+            // Display the command
+            appendMessage('> ' + command, 'info');
+            
+            // Send to server
+            socket.emit('command', command);
+            
+            // Clear input
+            input.value = '';
+        }
+
+        function navigateHistory(direction) {
+            const input = document.getElementById('commandInput');
+            
+            if (direction === 'up') {
+                if (historyIndex < commandHistory.length - 1) {
+                    historyIndex++;
+                    input.value = commandHistory[historyIndex];
+                }
+            } else if (direction === 'down') {
+                if (historyIndex > 0) {
+                    historyIndex--;
+                    input.value = commandHistory[historyIndex];
+                } else if (historyIndex === 0) {
+                    historyIndex = -1;
+                    input.value = '';
+                }
+            }
+        }
+
+        function clearOutput() {
+            document.getElementById('output').innerHTML = '';
+        }
+
+        // Initialize when page loads
+        window.addEventListener('load', init);
+    </script>
+</body>
+</html>

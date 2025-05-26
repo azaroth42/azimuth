@@ -7,6 +7,7 @@ from decorator import make_command
 from flask_socketio import disconnect
 import time
 
+
 # --- Base Class ---
 class BaseThing:
     """Base class for all things in the MUD."""
@@ -34,6 +35,8 @@ class BaseThing:
         self.properties = data.get("properties", {})
         self.functions = data.get("functions", {})
         self.commands_cached = {}
+
+        print(f"Instantiated: {recursive} {self} ")
 
         location = data.get("location", None)
         self.location = None
@@ -98,18 +101,18 @@ class BaseThing:
         # does name match this object?
         if name == "me" and player == self:
             return 1
-        elif name == "here" and player.location == self:
+        elif name == "here" and player and player.location == self:
             return 1
 
         names = [self.name.lower()]
         for a in self.aliases:
             names.append(a.lower())
-        if ' ' in self.name:
+        if " " in self.name:
             namebits = self.name.lower().split()
-            if not namebits[-1] in names:
+            if namebits[-1] not in names:
                 names.append(namebits[-1])
 
-        if type(name) == str:
+        if type(name) is str:
             name = name.lower()
             if name in names:
                 return 1
@@ -156,15 +159,15 @@ class BaseThing:
             classes = list(inspect.getmro(self.__class__)[:-1])
             classes.reverse()
             for c in classes:
-                for (vb,info) in c.default_commands.items():
+                for vb, info in c.default_commands.items():
                     try:
                         cmds[vb].extend(copy.deepcopy(info))
-                    except:
+                    except Exception:
                         cmds[vb] = copy.deepcopy(info)
             for k, v in self.commands.items():
                 try:
                     cmds[k].extend(v)
-                except:
+                except Exception:
                     cmds[k] = v
             self.commands_cached = cmds
         if match is None:
@@ -181,7 +184,7 @@ class BaseThing:
         for verb in verbs:
             try:
                 self.commands[verb].append(info)
-            except:
+            except Exception:
                 self.commands[verb] = [info]
 
     @make_command(["look", "l"], "self")
@@ -234,9 +237,8 @@ class Place(BaseThing):
         elif isinstance(who, list):
             # need to tell all contents if not in who
             for c in self.contents:
-                if c not in who and hasattr(c, 'tell'):
+                if c not in who and hasattr(c, "tell"):
                     c.tell(msg)
-
 
     def look_at(self, player):
         """Generates a description of the place, its contents, and exits"""
@@ -302,10 +304,14 @@ class Exit(BaseThing):
         if src is not None:
             self.source = src
             src.add_exit(self)
-        dest = world.get_object(data["destination"])
-        if dest is not None:
-            self.destination = dest
-            dest.add_entrance(self)
+        # Lazy load destinations after first room
+        if not recursive:
+            self.destination = data["destination"]
+        else:
+            dest = world.get_object(data["destination"], recursive=False)
+            if dest is not None:
+                self.destination = dest
+                dest.add_entrance(self)
 
     @make_command(["go", "walk"], "self")
     @make_command(["go", "walk"], None, ["through"], "self")
@@ -317,6 +323,15 @@ class Exit(BaseThing):
             player.tell(self.get_message("leave_fail_destination", player))
         else:
             dest = self.destination
+            # Load up the next room
+            if type(dest) is str:
+                dest = self.world.get_object(dest)
+                if dest is None:
+                    player.tell(self.get_message("leave_fail_destination", player))
+                    return
+                else:
+                    self.destination = dest
+
             player.tell(self.get_message("leave", player))
             player.move_to(dest)
             if player.location == dest:
@@ -331,19 +346,24 @@ class Exit(BaseThing):
         data.update(
             {
                 "source": self.source.id if self.source else None,
-                "destination": self.destination.id if self.destination else None,
             }
         )
+        if type(self.destination) is str:
+            data["destination"] = self.destination
+        elif isinstance(self.destination, Place):
+            data["destination"] = self.destination.id
+        elif not self.destination:
+            data["destination"] = None
+        else:
+            print(f"Tried to serialize {self.destination} on {self}")
         return data
 
 
-
 class OpenableExit(Exit, Openable):
-
     default_messages = {
         "go_fail_closed": "You cannot go through that, it's closed.",
         "open_destination": "{player} opens {self} from the other side.",
-        "close_destination": "{player} closes {self} from the other side."
+        "close_destination": "{player} closes {self} from the other side.",
     }
 
     def __init__(self, id, world, data, recursive=True):
@@ -397,7 +417,7 @@ class Object(BaseThing):
         "drop": "You drop {self}.",
         "use_fail": "You can't use {self}.",
         "use": "You use {self}.",
-        "use_others": "{player} uses {self}."
+        "use_others": "{player} uses {self}.",
     }
 
     def take_ok(self, player):
@@ -417,7 +437,6 @@ class Object(BaseThing):
 
     def use_on_effect(self, player, target):
         return None
-
 
     @make_command(["get", "take", "pick"], "self")
     def get(self, player, prep=None, verb=None):
@@ -495,7 +514,6 @@ class Player(BaseThing):
         self.username = data["username"]
         self.password_hash = data["password_hash"]
         self.last_location = data.get("last_location", None)
-        self.command_sets = []
         self.last_active_time = time.time()
 
     def check_password(self, password):
@@ -508,15 +526,16 @@ class Player(BaseThing):
         data.update(
             {
                 "username": self.username,
-                "password_hash": self.password_hash
+                "password_hash": self.password_hash,
+                "home": self.home.id if self.home else None,
             }
         )
         if type(self.last_location) is str:
             data["last_location"] = self.last_location
         elif self.last_location:
-            data['last_location'] = self.last_location.id
+            data["last_location"] = self.last_location.id
         else:
-            data['last_location'] = None
+            data["last_location"] = None
         return data
 
     def tell(self, message):
@@ -527,7 +546,7 @@ class Player(BaseThing):
         if what.location == self.location or what.location == self:
             return True
         elif isinstance(what, Exit) and what.source == self.location:
-           return True
+            return True
         else:
             return False
 
@@ -552,7 +571,7 @@ class Player(BaseThing):
             stuff = ", ".join([x.name for x in self.contents])
             player.tell(f"You are carrying: {stuff}")
 
-    @make_command("say", "all")
+    @make_command("say", "any")
     def say(self, argstr, prep=None, verb=None):
         """Allows a player to say something in their current location."""
         if not argstr:
@@ -560,10 +579,10 @@ class Player(BaseThing):
         elif not self.location:
             self.tell("You are not in a place where you can speak.")
         else:
-            self.tell(f"You say, \"{argstr}\"")
-            self.location.announce_all_but(f"{self.name} says, \"{argstr}\"", self)
+            self.tell(f'You say, "{argstr}"')
+            self.location.announce_all_but(f'{self.name} says, "{argstr}"', self)
 
-    @make_command("emote", "all")
+    @make_command("emote", "any")
     def emote(self, argstr, prep=None, verb=None):
         """Allows a player to emote something in their current location."""
         if not argstr:
@@ -573,7 +592,7 @@ class Player(BaseThing):
         else:
             self.location.announce(f"{self.name} {argstr}")
 
-    @make_command(["wh", "whisper"], "all", "to", "Player")
+    @make_command(["wh", "whisper"], "any", "to", "Player")
     def whisper(self, argstr, target, prep=None, verb=None):
         pass
 
@@ -604,7 +623,7 @@ class Player(BaseThing):
         elif self.home == self.location:
             player.tell("You are already at home.")
         else:
-            self.tell(f"You tap your heels three times...")
+            self.tell("You tap your heels three times...")
             self.move_to(self.home)
 
     @make_command("@sethome")
@@ -617,18 +636,140 @@ class Player(BaseThing):
 
 
 class Programmer(Player):
-
-    @make_command(["eval", "@eval"], "all")
+    @make_command(["eval", "@eval"], "any")
     def eval(self, argstr, prep=None, verb=None):
         player = self
-        here = player.location
+        here = player.location  # noqa F841
+        me = self  # noqa F841
+        if "#" in argstr:
+            # would be a comment, but instead treat as obj ref
+            idx = argstr.index("#")
+            wd = argstr[idx:].split()[0]
+            if "." in wd:
+                wd = wd.split(".", 1)[0]
+            what = self.world.get_object_by_name(wd[1:])
+            if what is not None:
+                argstr = argstr.replace(wd, "what")
+            else:
+                player.tell(f"Could not find an object for: {wd}")
+                return
         res = eval(argstr)
         print(res)
         self.tell(repr(res))
 
-    @make_command(["@dig", "any", "to", "any"])
+    def make_exit_from_spec(self, spec):
+        if ":" in spec:
+            (ex_clss_name, ex1) = spec.split(":", 1)
+            ex_clss = self.world.import_class(ex_clss_name)
+            if not issubclass(ex_clss, Exit):
+                return None
+            ex1 = ex1.split(",")
+        else:
+            ex_clss = Exit
+            ex1 = spec.split(",")
+
+        ex_data = {"name": ex1[0], "source": None, "destination": None}
+        if len(ex1) > 1:
+            ex_data["aliases"] = ex1[1:]
+        exit = ex_clss(None, self.world, ex_data, recursive=False)
+        exit._save()
+        return exit
+
+    @make_command("@dig", "any", "to", "any")
     def dig(self, player, exits, room, prep=None, verb=None):
-        pass
+        """@dig north,n|south,s to name of room
+        @dig east to #<room>"""
+        if not exits:
+            player.tell("You need to specify an exit.")
+        elif not room:
+            player.tell("You need to specify a room name.")
+        else:
+            bits = exits.split("|")
+            if len(bits) > 2:
+                # more than two exits?
+                player.tell("You can only create an exit to and from.")
+                return
+
+            if room.startswith("#"):
+                place = self.world.get_object_by_id(room[1:], Place)
+                if place is None:
+                    place = self.world.get_object_by_name(room[1:], Place)
+            else:
+                # Check if looks like a UUID and refuse?
+                place = Place(None, self.world, {"name": room}, recursive=False)
+                place._save()
+
+            if not place:
+                player.tell(f"Could not find a room for {room}")
+            else:
+                exit1 = self.make_exit_from_spec(bits[0])
+                if exit1 is not None:
+                    exit1.source = self.location
+                    exit1.destination = place
+                    self.location.add_exit(exit1)
+                else:
+                    player.tell(f"Could not make exit from {bits[0]}")
+                if len(bits) == 2:
+                    exit2 = self.make_exit_from_spec(bits[1])
+                    if exit2 is not None:
+                        exit2.source = place
+                        exit2.destination = self.location
+                        place.add_exit(exit2)
+                    else:
+                        player.tell(f"Could not make exit from {bits[1]}")
+            player.tell(f"You dig {exits} to {room} ({place}).")
+
+    @make_command("@chparent", "any", "to", "any")
+    def change_parent(self, player, what, new_class, prep=None, verb=None):
+        player.tell("chparent")
+        if not what:
+            player.tell("You need to specify an object.")
+        elif not new_class:
+            player.tell("You need to specify a new class.")
+        else:
+            # directly change the class
+            nc = self.world.import_class(new_class)
+            if nc is not None:
+                what.__class__ = nc
+                what._save()
+                player.tell(f"You change the parent of {what} to {new_class}.")
+            else:
+                player.tell(f"Could not find class {new_class}")
+
+    @make_command("@rename", "any", "to", "any")
+    def rename(self, player, what, new_name, prep=None, verb=None):
+        if not what:
+            player.tell("You need to specify an object.")
+        elif not new_name:
+            player.tell("You need to specify a new name.")
+        else:
+            # directly change the class
+            what.name = new_name
+            what._save()
+            player.tell(f"You rename {what} to {new_name}.")
+
+    @make_command("@create", "any", "as", "any")
+    def create(self, player, what, new_class, prep=None, verb=None):
+        if not what:
+            player.tell("You need to specify an object.")
+        elif not new_class:
+            player.tell("You need to specify a new class.")
+        else:
+            # directly change the class
+            nc = self.world.import_class(new_class)
+            if nc is not None:
+                obj = nc(None, self.world, {"name": what}, recursive=False)
+                obj.move_to(player)
+                obj._save()
+                player.tell(f"You create {what} as {new_class}.")
+            else:
+                player.tell(f"Could not find class {new_class}")
+
+    @make_command("@dumpdb")
+    def dump_database(self, player, prep=None, verb=None):
+        """@dump database to disk"""
+        self.tell("Dumping database...")
+        self.world.dump_database()
 
     @make_command("@messages", "any")
     def list_messages(self, player, target, prep=None, verb=None):

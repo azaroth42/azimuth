@@ -1,6 +1,7 @@
 import os
 import json
 import glob
+import requests
 
 
 class Storage:
@@ -72,6 +73,16 @@ class SimpleFileStorage(Storage):
         with open(fn, "w") as fh:
             fh.write(json.dumps(what))
 
+    def delete(self, what_id):
+        key = what_id.replace("/", self.slash_replacement)
+        if not key.endswith(self.suffix):
+            key = key + self.suffix
+        fn = os.path.join(self.directory, key)
+        if os.path.exists(fn):
+            os.remove(fn)
+        else:
+            print(f"File does not exist: {self.directory}/{fn}")
+
     def get_object_by_id(self, id, clss=None):
         fn = id.replace("/", self.slash_replacement)
         files = glob.glob(os.path.join(self.directory, f"{fn}*"))
@@ -88,3 +99,88 @@ class SimpleFileStorage(Storage):
             return files
         else:
             return None
+
+
+class MlStorage(Storage):
+    def __init__(self, base_url, username, password, database):
+        self.data_url = "http://localhost:5001/data"
+        self.base_url = base_url
+        self.username = username
+        self.password = password
+        self.database = database
+        self.auth = requests.auth.HTTPDigestAuth(username, password)
+        self.headers = {"Accept": "application/json"}
+
+    def load(self, docid):
+        url = f"{self.base_url}/v1/documents"
+        params = {"database": self.database}
+        params["uri"] = f"{self.data_url}/{docid}"
+        headers = self.headers.copy()
+        headers["Content-Type"] = "application/json"
+        r = requests.get(url, auth=self.auth, headers=headers, params=params, timeout=3)
+        if r.status_code == 404:
+            return None
+        elif r.status_code != 200:
+            raise Exception(f"Unexpected status code: {r.status_code}")
+        else:
+            js = r.json()
+            return js
+
+    def save(self, what):
+        url = f"{self.base_url}/v1/documents"
+        params = {"database": self.database}
+        params["uri"] = f"{self.data_url}/{what['id']}"
+        data = json.dumps(what)
+        headers = self.headers.copy()
+        headers["Content-Type"] = "application/json"
+        r = requests.put(url, auth=self.auth, headers=headers, params=params, data=data, timeout=3)
+        if r.status_code == 201:
+            return None
+        else:
+            raise Exception(f"Failed to save document: {r.text}")
+
+    def delete(self, docid):
+        url = f"{self.base_url}/v1/documents"
+        params = {"database": self.database}
+        params["uri"] = f"{self.data_url}/{docid}"
+        headers = self.headers.copy()
+        headers["Content-Type"] = "application/json"
+        r = requests.delete(url, auth=self.auth, headers=headers, params=params, timeout=3)
+        print(r.status_code)
+
+    def _make_results(self, js):
+        results = []
+        for doc in js["results"]:
+            docid = doc["uri"].rsplit("/")[-1]
+            results.append(docid)
+        return results
+
+    def do_search(self, query):
+        url = f"{self.base_url}/v1/search"
+        params = {"database": self.database}
+        data = json.dumps(query)
+        headers = self.headers.copy()
+        headers["Content-Type"] = "application/json"
+        r = requests.post(url, auth=self.auth, headers=headers, params=params, data=data, timeout=3)
+        js = r.json()
+        results = self._make_results(js)
+        if len(results) == 1:
+            return self.load(results[0])
+        elif not results:
+            return None
+        else:
+            return []
+
+    def get_object_by_id(self, docid):
+        # id is leading fragment, not the full id (otherwise would just use load)
+        fwq = {"fieldWordQuery": {"field": "id", "text": f"{docid}*"}}
+        cts = {"ctsquery": fwq}
+        return self.do_search(cts)
+
+    def get_object_by_name(self, name, clss=None):
+        fwq = {"fieldWordQuery": {"field": "name", "text": name}}
+        if clss is not None:
+            cfwq = {"fieldWordQuery": {"field": "class", "text": clss.__name__}}
+            fwq = {"andQuery": {"queries": [fwq, cfwq]}}
+        cts = {"ctsquery": fwq}
+        return self.do_search(cts)

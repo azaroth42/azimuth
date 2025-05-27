@@ -1,14 +1,30 @@
-from flask import Flask, request, render_template
+from flask import Flask, request, render_template, jsonify
 from flask_socketio import SocketIO, emit
-from persistence import SimpleFileStorage
+import persistence
 from world import setup_world
 import atexit
+import dotenv
+import os
+
+dotenv.load_dotenv()
 
 # --- Flask & SocketIO Setup ---
 app = Flask(__name__)
 socketio = SocketIO(app)
-db = SimpleFileStorage()
-world_id = "WORLD1"
+
+world_id = os.getenv("AZIMUTH_WORLD_ID", "WORLD1")
+db_type = os.getenv("AZIMUTH_DB_TYPE", "file")
+
+if db_type == "file":
+    db = persistence.SimpleFileStorage()
+elif db_type == "marklogic":
+    url = os.getenv("AZIMUTH_ML_URL", "http://localhost:8000")
+    user = os.getenv("AZIMUTH_ML_USER", "admin")
+    password = os.getenv("AZIMUTH_ML_PASSWORD")
+    dbname = os.getenv("AZIMUTH_ML_DB", "azimuth")
+    db = persistence.MlStorage(url, user, password, dbname)
+
+
 world = setup_world(db, world_id)
 if not world:
     print("FATAL: Could not initialize world.")
@@ -19,6 +35,19 @@ if not world:
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/data/<identifier>")
+def fetch_data(identifier):
+    if len(identifier) != 36:
+        return db.get_object_by_id(identifier)
+    else:
+        return jsonify(db.load(identifier))
+
+
+@app.route("/search/<name>")
+def search_data(name):
+    return jsonify(db.get_object_by_name(name))
 
 
 # --- SocketIO Event Handlers ---

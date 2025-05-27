@@ -218,7 +218,7 @@ class World:
 
         player = self.load(player_id)
         if not isinstance(player, entities.Player):
-            return "Username is not associated with a player object"
+            return f"Username is not associated with a player object: {player.__class__}"
 
         # Check if password matches
         if not check_password_hash(player.password_hash, password):
@@ -389,7 +389,7 @@ def setup_world(db, world_id):
         # constructor is (id, world, data, recursive)
         # main data fields: name, description, location, contents
 
-        from entities import Place, Object, Exit, Container
+        from entities import Place, Object, Exit, Container, Programmer
 
         # Places - Keep track of IDs for linking
         start_room = Place(
@@ -400,6 +400,18 @@ def setup_world(db, world_id):
                 "description": "A small, damp stone chamber. It feels like the beginning of an adventure.",
             },
         )
+
+        wizard = Programmer(
+            None,
+            world,
+            {
+                "name": "wizard",
+                "description": "A wise old wizard.",
+                "username": "wizard",
+                "password_hash": "scrypt:32768:8:1$NbFEqSQjMVUSFVTf$66107ca8d22a1eca7c2b338d7ece787f682cfec7274ea7594cae37027029bd3b7cbad6583c76df1e05ca8d8f465313e5246c6067c62ba17443b2ba5d624792da",
+            },
+        )
+
         hallway = Place(
             None,
             world,
@@ -511,6 +523,7 @@ def setup_world(db, world_id):
 
         for what in [
             start_room,
+            wizard,
             hallway,
             treasure_room,
             sword,
@@ -527,6 +540,7 @@ def setup_world(db, world_id):
 
         config = {"id": world_id, "start_room_id": start_room.id}
         world.save(config)
+        world.players[wizard.username] = wizard.id
         world.persist_players()
         world.config = config
         return world

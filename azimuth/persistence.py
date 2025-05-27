@@ -171,9 +171,12 @@ class MlStorage(Storage):
         else:
             return []
 
-    def get_object_by_id(self, docid):
+    def get_object_by_id(self, docid, clss=None):
         # id is leading fragment, not the full id (otherwise would just use load)
         fwq = {"fieldWordQuery": {"field": "id", "text": f"{docid}*"}}
+        if clss is not None:
+            cfwq = {"fieldWordQuery": {"field": "class", "text": clss.__name__}}
+            fwq = {"andQuery": {"queries": [fwq, cfwq]}}
         cts = {"ctsquery": fwq}
         return self.do_search(cts)
 

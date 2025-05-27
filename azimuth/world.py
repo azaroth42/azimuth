@@ -1,4 +1,3 @@
-from flask_socketio import emit, join_room, leave_room
 from werkzeug.security import generate_password_hash, check_password_hash
 import entities
 from decorator import commands
@@ -32,6 +31,7 @@ class World:
         self.default_messages = {
             "fail_visible": "You can't see anything like that here.",
         }
+        self.socketio = None  # Will be injected by main.py
 
         self.exit_names = {
             "n": "north",
@@ -98,7 +98,10 @@ class World:
         data = self.db.load(id)
         # bootstrap it up from class name in dict
         if data and "class" in data:
-            clss = getattr(entities, data["class"])
+            if "." not in data["class"]:
+                clss = getattr(entities, data["class"])
+            else:
+                clss = self.import_class(data["class"])
             instance = clss(id, self, data, recursive)
             self.active_objects[id] = instance
             return instance
@@ -142,20 +145,9 @@ class World:
         # Persistence layer might be able to search too
         return self.db.get_object_by_id(id, clss)
 
-    def join_room(self, where, who):
-        join_room(where.id, who.connection)
-
-    def leave_room(self, where, who):
-        leave_room(where.id, who.connection)
-
-    def announce(self, msg, where, but=None):
-        if but is not None:
-            emit("message", msg, to=where.id, skip_sid=but.connection)
-        else:
-            emit("message", msg, to=where.id)
-
     def tell_player(self, who, msg):
-        emit("message", msg, to=who.connection)
+        if self.socketio:
+            self.socketio.emit("message", msg, to=who.connection)
 
     def handle_register(self, sid, data):
         """Handles player registration."""

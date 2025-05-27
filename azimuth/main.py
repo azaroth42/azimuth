@@ -1,16 +1,44 @@
-from flask import Flask, request, render_template, jsonify
-from flask_socketio import SocketIO, emit
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
+import socketio
 import persistence
 from world import setup_world
 import atexit
 import dotenv
 import os
+import uvicorn
+import asyncio
 
 dotenv.load_dotenv()
 
-# --- Flask & SocketIO Setup ---
-app = Flask(__name__)
-socketio = SocketIO(app)
+# --- FastAPI & SocketIO Setup ---
+app = FastAPI()
+
+# Create Socket.IO server
+sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
+socket_app = socketio.ASGIApp(sio, app)
+
+# Templates
+templates = Jinja2Templates(directory="templates")
+
+
+# Simple SocketIO wrapper for world compatibility
+class SocketIOWrapper:
+    def __init__(self, sio_instance):
+        self.sio = sio_instance
+
+    def emit(self, event, data, to=None, skip_sid=None):
+        # Simple emit - handle async in background
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(self.sio.emit(event, data, to=to))
+            else:
+                loop.run_until_complete(self.sio.emit(event, data, to=to))
+        except Exception:
+            pass  # Fail silently if async context issues
+
 
 world_id = os.getenv("AZIMUTH_WORLD_ID", "WORLD1")
 db_type = os.getenv("AZIMUTH_DB_TYPE", "file")
@@ -24,59 +52,59 @@ elif db_type == "marklogic":
     dbname = os.getenv("AZIMUTH_ML_DB", "azimuth")
     db = persistence.MlStorage(url, user, password, dbname)
 
-
 world = setup_world(db, world_id)
 if not world:
     print("FATAL: Could not initialize world.")
     exit(1)
 
-
-# --- Web Handler ---
-@app.route("/")
-def index():
-    return render_template("index.html")
+# Inject SocketIO wrapper into world for compatibility
+world.socketio = SocketIOWrapper(sio)
 
 
-@app.route("/data/<identifier>")
-def fetch_data(identifier):
+# --- Web Client ---
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
+
+
+# Inspect the database
+@app.get("/data/{identifier}")
+async def fetch_data(identifier: str):
     if len(identifier) != 36:
         return db.get_object_by_id(identifier)
     else:
-        return jsonify(db.load(identifier))
+        return JSONResponse(db.load(identifier))
 
 
-@app.route("/search/<name>")
-def search_data(name):
-    return jsonify(db.get_object_by_name(name))
+@app.get("/search/{name}")
+async def search_data(name: str):
+    return JSONResponse(db.get_object_by_name(name))
 
 
 # --- SocketIO Event Handlers ---
-@socketio.on("connect")
-def handle_connect():
+@sio.event
+async def connect(sid, environ):
     """Handles a new client connection. Does not log them in yet."""
-    sid = request.sid
     print(f"Client connected: {sid}")
     # Ask the client to either login or register
-    emit("message", world.motd)
-    emit(
+    await sio.emit("message", world.motd, to=sid)
+    await sio.emit(
         "message",
         "Please 'login <username> <password>' or 'register <username> <password>'.",
         to=sid,
     )
 
 
-@socketio.on("disconnect")
-def handle_disconnect():
+@sio.event
+async def disconnect(sid):
     """Handles a player disconnection"""
-    sid = request.sid
     print(f"Client disconnected: {sid}")
     world.on_disconnect(sid)
 
 
-@socketio.on("command")
-def handle_command(data):
-    """Handles commands received from a logged-in player."""
-    sid = request.sid
+@sio.event
+async def command(sid, data):
+    """Handles commands received from a player."""
     command_text = data.get("command") if isinstance(data, dict) else data  # Allow plain string command
     if not command_text or not isinstance(command_text, str):
         return
@@ -100,8 +128,9 @@ def handle_command(data):
             msg = f"Usage: {command_verb} <username> <password> [email]"
         else:
             msg = "You must 'login <user> <pass>' or 'register <user> <pass> <email>' first."
-        emit("message", msg, to=sid)
+        await sio.emit("message", msg, to=sid)
     else:
+        # Process command synchronously for now
         world.process_player_command(player_id, command_text)
 
 
@@ -112,6 +141,6 @@ def dump_database():
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    print("Starting SocketIO server...")
+    print("Starting uvicorn server...")
     atexit.register(dump_database)
-    socketio.run(app, debug=True, host="0.0.0.0", port=5001)
+    uvicorn.run(socket_app, host="0.0.0.0", port=5001, log_level="info")

@@ -219,26 +219,27 @@ class Place(BaseThing):
         super().on_enter(what)
         if isinstance(what, Player):
             what.tell(self.look_at(what))
-            self.world.join_room(self, what)
 
     def on_leave(self, what):
         super().on_leave(what)
-        if isinstance(what, Player):
-            self.world.leave_room(self, what)
 
     def announce(self, msg):
-        self.world.announce(msg, self)
+        for who in self.contents:
+            if hasattr(who, "tell"):
+                who.tell(msg)
 
     def announce_all_but(self, msg, who):
         if who is None:
             self.announce(msg)
+            return
         elif isinstance(who, Player):
-            self.world.announce(msg, self, who)
-        elif isinstance(who, list):
-            # need to tell all contents if not in who
-            for c in self.contents:
-                if c not in who and hasattr(c, "tell"):
-                    c.tell(msg)
+            who = [who]
+        elif not isinstance(who, list):
+            return
+        # need to tell all contents if not in who
+        for c in self.contents:
+            if c not in who and hasattr(c, "tell"):
+                c.tell(msg)
 
     def look_at(self, player):
         """Generates a description of the place, its contents, and exits"""
@@ -727,11 +728,17 @@ class Programmer(Player):
         elif not new_class:
             player.tell("You need to specify a new class.")
         else:
-            # directly change the class
             nc = self.world.import_class(new_class)
             if nc is not None:
-                what.__class__ = nc
-                what._save()
+                # get "what" --> object
+
+                data = what.to_dict()
+                data["class"] = new_class
+                self.world.save(data)
+                wid = what.id
+                del self.world.active_objects[wid]
+                del what
+                what = self.world.load(wid)
                 player.tell(f"You change the parent of {what} to {new_class}.")
             else:
                 player.tell(f"Could not find class {new_class}")

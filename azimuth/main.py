@@ -3,9 +3,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi_mcp import FastApiMCP
 import socketio
-import persistence
-from world import setup_world
-import atexit
+from .persistence import SimpleFileStorage, MlStorage
+from .world import setup_world
 import dotenv
 import os
 import uvicorn
@@ -46,13 +45,13 @@ world_id = os.getenv("AZIMUTH_WORLD_ID", "WORLD1")
 db_type = os.getenv("AZIMUTH_DB_TYPE", "file")
 
 if db_type == "file":
-    db = persistence.SimpleFileStorage()
+    db = SimpleFileStorage()
 elif db_type == "marklogic":
     url = os.getenv("AZIMUTH_ML_URL", "http://localhost:8000")
     user = os.getenv("AZIMUTH_ML_USER", "admin")
     password = os.getenv("AZIMUTH_ML_PASSWORD")
     dbname = os.getenv("AZIMUTH_ML_DB", "azimuth")
-    db = persistence.MlStorage(url, user, password, dbname)
+    db = MlStorage(url, user, password, dbname)
 
 world = setup_world(db, world_id)
 if not world:
@@ -138,8 +137,8 @@ async def command(sid, data):
         world.process_player_command(player_id, command_text)
 
 
-def dump_database():
-    print("Exiting, dumping database")
+@app.on_event("shutdown")
+def on_shutdown():
     world.dump_database()
 
 
@@ -149,5 +148,4 @@ mcp.mount()
 # --- Main Execution ---
 if __name__ == "__main__":
     print("Starting uvicorn server...")
-    atexit.register(dump_database)
     uvicorn.run(socket_app, host="0.0.0.0", port=5001, log_level="info")

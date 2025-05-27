@@ -1,6 +1,6 @@
 from werkzeug.security import generate_password_hash, check_password_hash
-import entities
-from decorator import commands
+from . import entities
+from azimuth.decorator import commands
 import copy
 import time
 from rich import print

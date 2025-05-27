@@ -1,10 +1,10 @@
-
 ### Vase: containable, not openable
 ### Bag: containable, openable, not lockable
 ### Chest: containable, openable, lockable
 ### Small Window: not containable, openable, lockable?
 
-from decorator import make_command, get_my_info
+from azimuth.decorator import make_command
+
 
 class StateToggle:
     # Can we abstract open, locked, etc as state toggles
@@ -44,6 +44,7 @@ class StateToggle:
 # open self with <str>
 # pull lever / raise lever / push button = some other toggle on paired object
 
+
 class Openable(StateToggle):
     """A mixin for openable/closable things, eg container, exit, some spaces)"""
 
@@ -55,7 +56,7 @@ class Openable(StateToggle):
         "toggle_open_off": "You close {self}.",
         "toggle_open_off_others": "{player} closes {self}",
         "toggle_open_on": "You open {self}.",
-        "toggle_open_on_others": "{player} opens {self}."
+        "toggle_open_on_others": "{player} opens {self}.",
     }
 
     def __init__(self, id, world, data, recursive=False):
@@ -90,7 +91,7 @@ class Openable(StateToggle):
         data.update(
             {
                 "open": self.is_open,
-                "open_paired_object": self.open_paired_object.id if self.open_paired_object else None
+                "open_paired_object": self.open_paired_object.id if self.open_paired_object else None,
             }
         )
         return data
@@ -104,7 +105,7 @@ class Lockable(Openable):
         "open_fail_locked": "You must unlock {self} first before opening it.",
         "lock_fail_player": "You cannot lock {self}",
         "locked_look_at": "It is locked.",
-        "unlocked_look_at": "It is unlocked."
+        "unlocked_look_at": "It is unlocked.",
     }
 
     def __init__(self, id, world, data, recursive=False):
@@ -167,7 +168,6 @@ class Lockable(Openable):
         elif self.locked_by_object is None:
             player.tell(self.get_message("unlock_fail_no_object", player))
         else:
-
             self.toggle_off("locked", player)
 
     def look_at(self, player):
@@ -184,20 +184,20 @@ class Lockable(Openable):
                 "is_locked": self.is_locked,
                 "locked_by_object": self.locked_by_object.id if self.locked_by_object else None,
                 "locked_by_player": self.locked_by_player.id if self.locked_by_player else None,
-                "lock_paired_object": self.lock_paired_object.id if self.lock_paired_object else None
+                "lock_paired_object": self.lock_paired_object.id if self.lock_paired_object else None,
             }
         )
         return data
+
 
 class Containable:
     ### Mixin for object that can contain things
 
     default_messages = {
-
         "take_from": "You take {object} from {self}",
         "take_from_others": "{player} takes {object} from {self}.",
         "put_in": "You put {object} in {self}.",
-        "put_in_others": "{player} puts {object} in {self}"
+        "put_in_others": "{player} puts {object} in {self}",
     }
 
     def my_match_object(self, name):
@@ -228,10 +228,9 @@ class Containable:
             player.tell(self.get_message("take_from", player, what))
             player.location.announce_all_but(self.get_message("take_from_others", player, what), player)
 
-
     @make_command(["look", "l"], "any", "in", "self")
     def look_at_in(self, player, target=None, prep=None, verb=None):
-        if not hasattr(self, 'is_open') or self.is_open:
+        if not hasattr(self, "is_open") or self.is_open:
             # okay to look
             pass
         else:
@@ -240,7 +239,7 @@ class Containable:
     def look_at(self, player):
         # contents
         conts = ", ".join([x.name for x in self.contents])
-        if not hasattr(self, 'is_open') or self.is_open:
+        if not hasattr(self, "is_open") or self.is_open:
             return f"Inside there is: {conts}"
         else:
             return ""
@@ -249,17 +248,15 @@ class Containable:
 # Mixin for things that can be somehow on or off.
 # e.g. lever, switch, button, curtains (?), tv (??)
 class Switchable(StateToggle):
-
     def __init__(self, id, world, data, recursive=False):
         super().__init__(world, data, data, recursive)
         self.is_on = data.get("is_on", False)
 
 
-
 # table, bike/horse, chair, platform etc.
 
-class Positionable:
 
+class Positionable:
     def position_self(self, player, prep=None, verb=None):
         pass
 

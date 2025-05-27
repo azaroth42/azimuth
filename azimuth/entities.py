@@ -2,9 +2,8 @@ import uuid
 from werkzeug.security import check_password_hash
 import inspect
 import copy
-from mixins import Openable, Lockable, Containable
-from decorator import make_command
-from flask_socketio import disconnect
+from azimuth.mixins import Openable, Lockable, Containable
+from azimuth.decorator import make_command
 import time
 
 
@@ -604,7 +603,7 @@ class Player(BaseThing):
     @make_command("@quit")
     def quit(self, player, target=None, prep=None, verb=None):
         self.tell("Goodbye!")
-        disconnect(player.connection)
+        # disconnect(player.connection)
 
     @make_command(["@desc", "@describe"], "self", "as", "any")
     def describe(self, player, target="", prep=None, verb=None):

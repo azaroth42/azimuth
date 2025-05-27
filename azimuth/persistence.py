@@ -134,9 +134,9 @@ class MlStorage(Storage):
         headers = self.headers.copy()
         headers["Content-Type"] = "application/json"
         r = requests.put(url, auth=self.auth, headers=headers, params=params, data=data, timeout=3)
-        if r.status_code == 201:
+        if r.status_code not in [200, 201]:
             return None
-        else:
+        elif r.status_code >= 300:
             raise Exception(f"Failed to save document: {r.text}")
 
     def delete(self, docid):

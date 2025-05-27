@@ -36,8 +36,6 @@ class BaseThing:
         self.functions = data.get("functions", {})
         self.commands_cached = {}
 
-        print(f"Instantiated: {recursive} {self} ")
-
         location = data.get("location", None)
         self.location = None
         if location is not None:

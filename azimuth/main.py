@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
+from fastapi_mcp import FastApiMCP
 import socketio
 import persistence
 from world import setup_world
@@ -15,12 +16,13 @@ dotenv.load_dotenv()
 # --- FastAPI & SocketIO Setup ---
 app = FastAPI()
 
+
 # Create Socket.IO server
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
 socket_app = socketio.ASGIApp(sio, app)
 
 # Templates
-templates = Jinja2Templates(directory="templates")
+templates = Jinja2Templates(directory="azimuth/templates")
 
 
 # Simple SocketIO wrapper for world compatibility
@@ -68,16 +70,18 @@ async def index(request: Request):
 
 
 # Inspect the database
-@app.get("/data/{identifier}")
+@app.get("/data/{identifier}", operation_id="get_record")
 async def fetch_data(identifier: str):
+    """Given the UUID identifier of an object, or sufficiently many characters to make it unique, return the object."""
     if len(identifier) != 36:
         return db.get_object_by_id(identifier)
     else:
         return JSONResponse(db.load(identifier))
 
 
-@app.get("/search/{name}")
-async def search_data(name: str):
+@app.get("/search/{name}", operation_id="search_record")
+async def search(name: str):
+    """Given a name of an object, search for it and return the object."""
     return JSONResponse(db.get_object_by_name(name))
 
 
@@ -138,6 +142,9 @@ def dump_database():
     print("Exiting, dumping database")
     world.dump_database()
 
+
+mcp = FastApiMCP(app, name="Azimuth MCP Server", describe_all_responses=True, describe_full_response_schema=True)
+mcp.mount()
 
 # --- Main Execution ---
 if __name__ == "__main__":

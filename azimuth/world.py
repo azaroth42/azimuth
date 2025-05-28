@@ -6,6 +6,8 @@ import time
 from rich import print
 import importlib
 import logging
+import asyncio
+import functools
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -145,9 +147,27 @@ class World:
         # Persistence layer might be able to search too
         return self.db.get_object_by_id(id, clss)
 
+    def call_async_partial(self, func):
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(func())
+            else:
+                loop.run_until_complete(func())
+        except Exception:
+            pass  # Fail silently if async context issues
+
+    def emit(self, event, data, to=None):
+        # Simple emit - handle async in background
+        func = functools.partial(self.socketio.emit, event, data, to)
+        self.call_async_partial(func)
+
     def tell_player(self, who, msg):
-        if self.socketio:
-            self.socketio.emit("message", msg, to=who.connection)
+        self.emit("message", msg, to=who.connection)
+
+    def disconnect_player(self, who):
+        func = functools.partial(self.socketio.disconnect, who.connection)
+        self.call_async_partial(func)
 
     def handle_register(self, sid, data):
         """Handles player registration."""

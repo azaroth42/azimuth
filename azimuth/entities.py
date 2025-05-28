@@ -603,7 +603,7 @@ class Player(BaseThing):
     @make_command("@quit")
     def quit(self, player, target=None, prep=None, verb=None):
         self.tell("Goodbye!")
-        # disconnect(player.connection)
+        self.world.disconnect_player(player)
 
     @make_command(["@desc", "@describe"], "self", "as", "any")
     def describe(self, player, target="", prep=None, verb=None):

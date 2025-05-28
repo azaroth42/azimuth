@@ -8,7 +8,6 @@ from .world import setup_world
 import dotenv
 import os
 import uvicorn
-import asyncio
 
 dotenv.load_dotenv()
 
@@ -22,24 +21,6 @@ socket_app = socketio.ASGIApp(sio, app)
 
 # Templates
 templates = Jinja2Templates(directory="azimuth/templates")
-
-
-# Simple SocketIO wrapper for world compatibility
-class SocketIOWrapper:
-    def __init__(self, sio_instance):
-        self.sio = sio_instance
-
-    def emit(self, event, data, to=None, skip_sid=None):
-        # Simple emit - handle async in background
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.create_task(self.sio.emit(event, data, to=to))
-            else:
-                loop.run_until_complete(self.sio.emit(event, data, to=to))
-        except Exception:
-            pass  # Fail silently if async context issues
-
 
 world_id = os.getenv("AZIMUTH_WORLD_ID", "WORLD1")
 db_type = os.getenv("AZIMUTH_DB_TYPE", "file")
@@ -59,7 +40,7 @@ if not world:
     exit(1)
 
 # Inject SocketIO wrapper into world for compatibility
-world.socketio = SocketIOWrapper(sio)
+world.socketio = sio
 
 
 # --- Web Client ---

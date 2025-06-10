@@ -1,6 +1,6 @@
 from werkzeug.security import generate_password_hash, check_password_hash
 from . import entities
-from azimuth.decorator import commands
+from azimuth.command_decorator import commands
 import copy
 import time
 from rich import print
@@ -32,6 +32,7 @@ class World:
         self.default_commands = {}
         self.default_messages = {
             "fail_visible": "You can't see anything like that here.",
+            "fail_command_match": "I don't understand that.",
         }
         self.socketio = None  # Will be injected by main.py
 
@@ -163,6 +164,8 @@ class World:
         self.call_async_partial(func)
 
     def tell_player(self, who, msg):
+        if msg.endswith("\n"):
+            msg = msg[:-1]
         self.emit("message", msg, to=who.connection)
 
     def disconnect_player(self, who):
@@ -371,14 +374,15 @@ class World:
                         if c["dobj"] == "self" and s.match_object(argstr, player):
                             c["func"](s, player, prep=None, verb=w1)
                             return
+                        elif c["dobj"] == "any":
+                            c["func"](s, player, argstr, prep=None, verb=w1)
+                            return
+            player.tell(player.get_message("fail_command_match", player))
 
             ### meta
-            # @who, @quit, [@]help
-            # @create, @dig, @desc, @set, @prop, @func, @eval
-
+            # @set, @prop, @func
             ### objects
             # furniture (sit at/on, stand/leave, say to table)
-
             ### MUD type commands
             # hold/wield/wear / stow/unwear
             # attack, cast, shoot

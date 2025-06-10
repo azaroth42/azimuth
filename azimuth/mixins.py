@@ -3,7 +3,7 @@
 ### Chest: containable, openable, lockable
 ### Small Window: not containable, openable, lockable?
 
-from azimuth.decorator import make_command
+from azimuth.command_decorator import make_command
 
 
 class StateToggle:
@@ -257,8 +257,61 @@ class Switchable(StateToggle):
 
 
 class Positionable:
-    def position_self(self, player, prep=None, verb=None):
-        pass
+    def __init__(self, id, world, data, recursive=False):
+        super().__init__(world, data, data, recursive)
+        self.positioned = data.get("positioned", [])
 
+    @make_command(
+        ["sit", "stand", "lean", "kneel", "crouch", "lie"],
+        "",
+        ["on", "against", "under", "beside", "next to"],
+        "self",
+    )
+    def position_self(self, player, prep=None, verb=None):
+        print(f"saw: {verb} ___ {prep} {self.name}")
+
+    @make_command(["put", "place", "position"], "any", ["on", "under", "beside", "next to"], "self")
     def position_object(self, player, target, prep=None, verb=None):
-        pass
+        print(f"saw: {verb} {target} {prep} {self.name}")
+
+
+class Holdable:
+    default_messages = {
+        "wield": "You hold {self}.",
+        "wield_others": "{player} holds {self}.",
+        "wield_failed_wielding": "You cannot hold {self}, as you are already holding it.",
+        "remove": "You put away {self}.",
+        "remove_others": "{player} puts away {self}.",
+        "remove_failed_not_wearing": "You cannot put away {self}, as you are not holding it.",
+    }
+
+    @make_command(["wield", "hold"], "self")
+    def wear(self, player, prep=None, verb=None):
+        player.tell(self.get_message("wear", player))
+        player.location.announce_all_but(self.get_message("wear_others", player), player)
+
+    @make_command(["unwield", "remove"], "self")
+    def remove(self, player, prep=None, verb=None):
+        player.tell(self.get_message("remove", player))
+        player.location.announce_all_but(self.get_message("remove_others", player), player)
+
+
+class Wearable(Holdable):
+    default_messages = {
+        "wear": "You wear {self}.",
+        "wear_others": "{player} puts on {self}.",
+        "wear_failed_wearing": "You cannot put on {self}, as you are already wearing it.",
+        "remove": "You take off {self}.",
+        "remove_others": "{player} takes off {self}.",
+        "remove_failed_not_wearing": "You cannot take off {self}, as you are not wearing it.",
+    }
+
+    @make_command("wear", "self")
+    def wear(self, player, prep=None, verb=None):
+        player.tell(self.get_message("wear", player))
+        player.location.announce_all_but(self.get_message("wear_others", player), player)
+
+    @make_command("remove", "self")
+    def remove(self, player, prep=None, verb=None):
+        player.tell(self.get_message("remove", player))
+        player.location.announce_all_but(self.get_message("remove_others", player), player)

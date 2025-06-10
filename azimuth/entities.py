@@ -3,7 +3,7 @@ from werkzeug.security import check_password_hash
 import inspect
 import copy
 from azimuth.mixins import Openable, Lockable, Containable
-from azimuth.decorator import make_command
+from azimuth.command_decorator import make_command
 import time
 
 
@@ -777,8 +777,31 @@ class Programmer(Player):
 
     @make_command("@messages", "any")
     def list_messages(self, player, target, prep=None, verb=None):
-        pass
+        """List all settable messages on target"""
+        print(target)
+        what = self.my_match_object(target)
+        msgs = what.messages
+        player.tell(f"Messages on {what.name}:")
+        msgl = []
+        for msg in msgs.items():
+            msgl.append(f'  {msg[0].rjust(18)}:  "{msg[1]}"')
+        player.tell("\n".join(msgl))
+        player.tell(f"Total messages: {len(msgs)}")
 
     @make_command("@message", "any", "as", "any")
-    def set_message(self, player, target, prep=None, verb=None):
-        pass
+    def set_message(self, player, target, msg, prep=None, verb=None):
+        """@message message_name on target as <string>"""
+        (message_name, target) = target.split(" on ", 1)
+        message_name = message_name.strip()
+        target = target.strip()
+        msg = msg.strip()
+        if not message_name:
+            player.tell("You need to specify a message name.")
+            return
+        what = self.my_match_object(target)
+        if not what:
+            player.tell(f"Could not find {target}")
+            return
+        what.messages[message_name] = msg
+        what._save()
+        player.tell(f"Set message {message_name} on {what.name} to {msg}")

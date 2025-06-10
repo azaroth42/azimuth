@@ -18,9 +18,8 @@ app = FastAPI()
 # Create Socket.IO server
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
 socket_app = socketio.ASGIApp(sio, app)
-
-# Templates
 templates = Jinja2Templates(directory="azimuth/templates")
+
 
 world_id = os.getenv("AZIMUTH_WORLD_ID", "WORLD1")
 db_type = os.getenv("AZIMUTH_DB_TYPE", "file")

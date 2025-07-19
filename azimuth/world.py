@@ -405,7 +405,7 @@ def setup_world(db, world_id):
         # constructor is (id, world, data, recursive)
         # main data fields: name, description, location, contents
 
-        from entities import Place, Object, Exit, Container, Programmer
+        from .entities import Place, Object, Exit, Container, Programmer, HeldObject, Clothing
 
         # Places - Keep track of IDs for linking
         start_room = Place(
@@ -446,7 +446,7 @@ def setup_world(db, world_id):
         )
 
         # Objects - Place them using location_id in constructor
-        sword = Object(
+        sword = HeldObject(
             None,
             world,
             {
@@ -455,6 +455,16 @@ def setup_world(db, world_id):
                 "location": start_room.id,
             },
         )
+        armor = Clothing(
+            None,
+            world,
+            {
+                "name": "chainmail armor",
+                "description": "A sturdy chainmail armor.",
+                "location": start_room.id,
+            },
+        )
+
         key = Object(
             None,
             world,
@@ -543,6 +553,7 @@ def setup_world(db, world_id):
             hallway,
             treasure_room,
             sword,
+            armor,
             key,
             bread,
             chest,

@@ -200,9 +200,9 @@ class Containable:
         "put_in_others": "{player} puts {object} in {self}",
     }
 
-    def my_match_object(self, name):
+    def my_match_object(self, name, player):
         for x in self.contents:
-            if x.match_object(name):
+            if x.match_object(name, player):
                 return x
         return None
 
@@ -220,7 +220,7 @@ class Containable:
     @make_command(["take", "get", "remove"], "Object", "from", "self")
     def take_from(self, player, target, prep=None, verb=None):
         # move target from self to player
-        what = self.my_match_object(target)
+        what = self.my_match_object(target, player)
         if not what:
             player.tell(f"You can't see anything matching {target} in {self.name}")
         else:
@@ -280,20 +280,20 @@ class Holdable:
         "wield": "You hold {self}.",
         "wield_others": "{player} holds {self}.",
         "wield_failed_wielding": "You cannot hold {self}, as you are already holding it.",
-        "remove": "You put away {self}.",
-        "remove_others": "{player} puts away {self}.",
-        "remove_failed_not_wearing": "You cannot put away {self}, as you are not holding it.",
+        "unwield": "You put away {self}.",
+        "unwield_others": "{player} puts away {self}.",
+        "unwield_failed_not_wielding": "You cannot put away {self}, as you are not holding it.",
     }
 
     @make_command(["wield", "hold"], "self")
-    def wear(self, player, prep=None, verb=None):
-        player.tell(self.get_message("wear", player))
-        player.location.announce_all_but(self.get_message("wear_others", player), player)
+    def wield(self, player, prep=None, verb=None):
+        player.tell(self.get_message("wield", player))
+        player.location.announce_all_but(self.get_message("wield_others", player), player)
 
     @make_command(["unwield", "remove"], "self")
-    def remove(self, player, prep=None, verb=None):
-        player.tell(self.get_message("remove", player))
-        player.location.announce_all_but(self.get_message("remove_others", player), player)
+    def unwield(self, player, prep=None, verb=None):
+        player.tell(self.get_message("unwield", player))
+        player.location.announce_all_but(self.get_message("unwield_others", player), player)
 
 
 class Wearable(Holdable):

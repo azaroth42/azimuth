@@ -2,7 +2,7 @@ import uuid
 from werkzeug.security import check_password_hash
 import inspect
 import copy
-from azimuth.mixins import Openable, Lockable, Containable
+from azimuth.mixins import Openable, Lockable, Containable, Positionable, Holdable, Wearable
 from azimuth.command_decorator import make_command
 import time
 
@@ -497,6 +497,33 @@ class Container(Object, Containable):
         # Now call the mixins independently
         d2 = Containable.look_at(self, who)
         return "\n".join([desc, d2])
+
+
+class Furniture(Object, Positionable):
+    """Represents a furniture object relative to which players and objects can be positioned."""
+
+    def look_at(self, who):
+        # Make contents visible if open
+        # super() will call on the object hierarchy
+        desc = super().look_at(who)
+        # Now call the mixins independently
+        d2 = Positionable.look_at(self, who)
+        return "\n".join([desc, d2])
+
+
+class Clothing(Object, Containable, Wearable):
+    """Represents a clothing object that can be worn, with pockets."""
+
+    def look_at(self, who):
+        """If wearing the clothing, then show its contents."""
+        desc = super().look_at(who)
+        # Now call the mixins independently
+        d2 = Wearable.look_at(self, who)
+        return "\n".join([desc, d2])
+
+
+class HeldObject(Object, Holdable):
+    pass
 
 
 # --- Player Class ---

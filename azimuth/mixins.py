@@ -109,7 +109,7 @@ class Lockable(Openable):
     }
 
     def __init__(self, id, world, data, recursive=False):
-        super().__init__(world, data, data, recursive)
+        super().__init__(id, world, data, recursive)
         self.is_locked = data.get("is_locked", False)
         lbo = data.get("locked_by_object", None)
         if lbo is not None:
@@ -249,7 +249,7 @@ class Containable:
 # e.g. lever, switch, button, curtains (?), tv (??)
 class Switchable(StateToggle):
     def __init__(self, id, world, data, recursive=False):
-        super().__init__(world, data, data, recursive)
+        super().__init__(id, world, data, recursive)
         self.is_on = data.get("is_on", False)
 
 
@@ -258,7 +258,7 @@ class Switchable(StateToggle):
 
 class Positionable:
     def __init__(self, id, world, data, recursive=False):
-        super().__init__(world, data, data, recursive)
+        super().__init__(id, world, data, recursive)
         self.positioned = data.get("positioned", [])
 
     @make_command(

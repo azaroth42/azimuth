@@ -499,6 +499,12 @@ class Container(Object, Containable):
         return "\n".join([desc, d2])
 
 
+class OpenableContainer(Container, Openable):
+    def __init__(self, id, world, data, recursive=False):
+        super().__init__(id, world, data, recursive)
+        Openable.__init__(self, id, world, data, recursive)
+
+
 class Furniture(Object, Positionable):
     """Represents a furniture object relative to which players and objects can be positioned."""
 
@@ -746,7 +752,6 @@ class Programmer(Player):
 
     @make_command("@chparent", "any", "to", "any")
     def change_parent(self, player, what, new_class, prep=None, verb=None):
-        player.tell("chparent")
         if not what:
             player.tell("You need to specify an object.")
         elif not new_class:
@@ -755,14 +760,14 @@ class Programmer(Player):
             nc = self.world.import_class(new_class)
             if nc is not None:
                 # get "what" --> object
-
-                data = what.to_dict()
+                target = player.my_match_object(what)
+                data = target.to_dict()
                 data["class"] = new_class
                 self.world.save(data)
-                wid = what.id
+                wid = target.id
                 del self.world.active_objects[wid]
-                del what
-                what = self.world.load(wid)
+                del target
+                target = self.world.load(wid)
                 player.tell(f"You change the parent of {what} to {new_class}.")
             else:
                 player.tell(f"Could not find class {new_class}")

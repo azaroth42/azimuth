@@ -66,7 +66,7 @@ class World:
         if not objectType:
             return None
         if "." not in objectType:
-            objectType = f"entities.{objectType}"
+            objectType = f"azimuth.entities.{objectType}"
         (modName, className) = objectType.rsplit(".", 1)
 
         try:

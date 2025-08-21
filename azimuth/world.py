@@ -96,18 +96,22 @@ class World:
         players["id"] = f"{self.id}_players"
         self.save(players)
 
+    def make_instance(self, data, recursive=True):
+        if "." not in data["class"]:
+            clss = getattr(entities, data["class"])
+        else:
+            clss = self.import_class(data["class"])
+        id = data["id"]
+        instance = clss(id, self, data, recursive)
+        self.active_objects[id] = instance
+        return instance
+
     def load(self, id, recursive=True):
         # fetch entity from persistence layer
         data = self.db.load(id)
         # bootstrap it up from class name in dict
         if data and "class" in data:
-            if "." not in data["class"]:
-                clss = getattr(entities, data["class"])
-            else:
-                clss = self.import_class(data["class"])
-            instance = clss(id, self, data, recursive)
-            self.active_objects[id] = instance
-            return instance
+            return self.make_instance(data, recursive)
         else:
             return data
 
@@ -133,7 +137,11 @@ class World:
             if (clss is None or isinstance(what, clss)) and what.match_object(name, None):
                 return what
         # Persistence layer might be able to search too
-        return self.db.get_object_by_name(name, clss)
+        data = self.db.get_object_by_name(name, clss)
+        if data:
+            return self.make_instance(data)
+        else:
+            return data
 
     def get_object_by_id(self, id, clss=None):
         if not id:
@@ -146,7 +154,11 @@ class World:
                 if what.startswith(id):
                     return self.active_objects[what]
         # Persistence layer might be able to search too
-        return self.db.get_object_by_id(id, clss)
+        data = self.db.get_object_by_id(id, clss)
+        if data:
+            return self.make_instance(data)
+        else:
+            return data
 
     def call_async_partial(self, func):
         try:

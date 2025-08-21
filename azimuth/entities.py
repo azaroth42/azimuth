@@ -837,3 +837,19 @@ class Programmer(Player):
         what.messages[message_name] = msg
         what._save()
         player.tell(f"Set message {message_name} on {what.name} to {msg}")
+
+    @make_command("@teleport", "any")
+    def teleport(self, player, target, prep=None, verb=None):
+        """@teleport target"""
+
+        if target.startswith("#"):
+            place = self.world.get_object_by_id(target[1:], Place)
+        else:
+            place = self.world.get_object_by_name(target, Place)
+
+        if not place:
+            player.tell(f"Could not find {target}")
+            return
+        else:
+            player.tell(f"Teleporting to {place.name}")
+            player.move_to(place)

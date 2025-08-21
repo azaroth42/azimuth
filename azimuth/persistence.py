@@ -2,6 +2,7 @@ import os
 import json
 import glob
 import requests
+import subprocess
 
 
 class Storage:
@@ -86,8 +87,10 @@ class SimpleFileStorage(Storage):
     def get_object_by_id(self, id, clss=None):
         fn = id.replace("/", self.slash_replacement)
         files = glob.glob(os.path.join(self.directory, f"{fn}*"))
+        print(f"files: {files}")
         if len(files) == 1:
-            return self.load(files[0])
+            fn = files[0].replace(f"{self.directory}/", "").replace(".json", "")
+            return self.load(fn)
         elif files:
             if clss:
                 # read them and filter for 'class' == clss.__name__
@@ -99,6 +102,33 @@ class SimpleFileStorage(Storage):
             return files
         else:
             return None
+
+    def get_object_by_name(self, name, clss=None):
+        # Use system `grep` to search files for name
+        cmd = f"grep '{name}' {self.directory}/*"
+        output = subprocess.check_output(cmd, shell=True).decode("utf-8")
+        files = output.split("\n")
+        files = [f.split(":")[0] for f in files if f]
+        print(f"grep: {files}")
+        if len(files) == 1:
+            fn = files[0].replace(f"{self.directory}/", "").replace(".json", "")
+            return self.load(fn)
+        elif len(files) > 1:
+            raise ValueError(f"Multiple files found for name '{name}'")
+
+        # Brute force search of all objects
+        files = os.listdir(self.directory)
+        for fn in files:
+            fn = os.path.join(self.directory, fn)
+            with open(fn) as fh:
+                data = json.load(fh)
+                if data["name"] == name:
+                    if clss:
+                        if data["class"] == clss.__name__:
+                            return self.load(fn)
+                    else:
+                        return self.load(fn)
+        return None
 
 
 class MlStorage(Storage):

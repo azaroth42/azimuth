@@ -70,6 +70,9 @@ class BaseThing:
         """Returns the description of the thing."""
         return self.description
 
+    def contained_look_at(self, who=None):
+        return ""
+
     def move_to(self, where):
         """Update location and contents"""
         if self.location is not None:
@@ -520,6 +523,10 @@ class Furniture(Object, Positionable):
 class Clothing(Object, Containable, Wearable):
     """Represents a clothing object that can be worn, with pockets."""
 
+    def __init__(self, id, world, data, recursive=False):
+        super().__init__(id, world, data, recursive)
+        Wearable.__init__(self, id, world, data, recursive)
+
     def look_at(self, who):
         """If wearing the clothing, then show its contents."""
         desc = super().look_at(who)
@@ -527,9 +534,17 @@ class Clothing(Object, Containable, Wearable):
         d2 = Wearable.look_at(self, who)
         return "\n".join([desc, d2])
 
+    def contained_look_at(self, who=None):
+        return Wearable.contained_look_at(self, who)
+
 
 class HeldObject(Object, Holdable):
-    pass
+    def __init__(self, id, world, data, recursive=False):
+        super().__init__(id, world, data, recursive)
+        Holdable.__init__(self, id, world, data, recursive)
+
+    def contained_look_at(self, who=None):
+        return Holdable.contained_look_at(self, who)
 
 
 # --- Player Class ---
@@ -569,9 +584,19 @@ class Player(BaseThing):
             data["last_location"] = None
         return data
 
+    def look_at(self, who=None):
+        desc = super().look_at(who)
+        for item in self.contents:
+            if xd := item.contained_look_at(who):
+                desc += f"\n{xd}"
+
+        return desc
+
     def tell(self, message):
         if self.connection:
             self.world.tell_player(self, message)
+        else:
+            print(message)
 
     def can_see(self, what):
         if what.location == self.location or what.location == self:
@@ -587,7 +612,7 @@ class Player(BaseThing):
         elif name == "here":
             return self.location
         else:
-            for x in [*self.contents, *self.location.contents]:
+            for x in [*self.contents, *self.location.contents, *self.location.exits.values()]:
                 if x.match_object(name, self):
                     return x
         return None
@@ -853,3 +878,18 @@ class Programmer(Player):
         else:
             player.tell(f"Teleporting to {place.name}")
             player.move_to(place)
+
+    @make_command(["@desc", "@describe"], "any", "as", "any")
+    def describe(self, player, what="", desc="", prep=None, verb=None):
+        if player != self:
+            player.tell("You can't describe that.")
+        else:
+            target = player.my_match_object(what)
+            if not target:
+                player.tell(f"You can't see '{what}' to describe it")
+            elif not desc:
+                player.tell("You need to give a description")
+            else:
+                target.description = desc
+                target._save()
+                player.tell(f"Set description of {target.name} to: {desc}")

@@ -280,38 +280,103 @@ class Holdable:
         "wield": "You hold {self}.",
         "wield_others": "{player} holds {self}.",
         "wield_failed_wielding": "You cannot hold {self}, as you are already holding it.",
+        "wield_failed_not_in_contents": "You cannot wield or remove {self}, as you are not carrying it.",
         "unwield": "You put away {self}.",
         "unwield_others": "{player} puts away {self}.",
         "unwield_failed_not_wielding": "You cannot put away {self}, as you are not holding it.",
     }
 
+    def __init__(self, id, world, data, recursive=False):
+        self.held_by = data.get("held_by", None)
+
+    def to_dict(self):
+        """Returns a dictionary representation of the exit."""
+        data = super().to_dict()
+        data.update(
+            {
+                "held_by": self.held_by,
+            }
+        )
+        return data
+
+    def contained_look_at(self, who=None):
+        if self.held_by is not None:
+            return f"Held: {self.name}"
+        else:
+            return ""
+
     @make_command(["wield", "hold"], "self")
     def wield(self, player, prep=None, verb=None):
-        player.tell(self.get_message("wield", player))
-        player.location.announce_all_but(self.get_message("wield_others", player), player)
+        if self not in player.contents:
+            player.tell(self.get_message("weild_failed_not_in_contents", player))
+        elif self.held_by is not None:
+            player.tell(self.get_message("wield_failed_wielding", player))
+        else:
+            self.held_by = player
+            player.tell(self.get_message("wield", player))
+            player.location.announce_all_but(self.get_message("wield_others", player), player)
 
     @make_command(["unwield", "remove"], "self")
     def unwield(self, player, prep=None, verb=None):
-        player.tell(self.get_message("unwield", player))
-        player.location.announce_all_but(self.get_message("unwield_others", player), player)
+        if self not in player.contents:
+            player.tell(self.get_message("weild_failed_not_in_contents", player))
+        elif self.held_by is not None:
+            player.tell(self.get_message("unwield_failed_not_wielding", player))
+        else:
+            self.held_by = None
+            player.tell(self.get_message("unwield", player))
+            player.location.announce_all_but(self.get_message("unwield_others", player), player)
 
 
-class Wearable(Holdable):
+class Wearable:
     default_messages = {
         "wear": "You wear {self}.",
         "wear_others": "{player} puts on {self}.",
         "wear_failed_wearing": "You cannot put on {self}, as you are already wearing it.",
+        "wear_failed_not_in_contents": "You cannot wear or remove {self}, as you are not carrying it.",
         "remove": "You take off {self}.",
         "remove_others": "{player} takes off {self}.",
         "remove_failed_not_wearing": "You cannot take off {self}, as you are not wearing it.",
     }
 
+    def __init__(self, id, world, data, recursive=False):
+        self.worn_by = data.get("worn_by", None)
+
+    def to_dict(self):
+        """Returns a dictionary representation of the exit."""
+        data = super().to_dict()
+        data.update(
+            {
+                "worn_by": self.worn_by,
+            }
+        )
+        return data
+
+    def contained_look_at(self, who=None):
+        if self.worn_by is not None:
+            return f"Worn: {self.name}"
+        else:
+            return ""
+
     @make_command("wear", "self")
     def wear(self, player, prep=None, verb=None):
-        player.tell(self.get_message("wear", player))
-        player.location.announce_all_but(self.get_message("wear_others", player), player)
+        # Need to be in inventory to wear
+        if self not in player.contents:
+            player.tell(self.get_message("wear_failed_not_in_contents", player))
+        elif self.worn_by is not None:
+            player.tell(self.get_message("wear_failed_wearing", player))
+        else:
+            self.worn_by = player
+            player.tell(self.get_message("wear", player))
+            player.location.announce_all_but(self.get_message("wear_others", player), player)
 
     @make_command("remove", "self")
     def remove(self, player, prep=None, verb=None):
-        player.tell(self.get_message("remove", player))
-        player.location.announce_all_but(self.get_message("remove_others", player), player)
+        if self not in player.contents:
+            player.tell(self.get_message("wear_failed_not_in_contents", player))
+        elif self.worn_by != player:
+            player.tell(self.get_message("remove_failed_not_wearing", player))
+        else:
+            self.worn_by = None
+            player.tell(self.get_message("remove", player))
+            player.location.announce_all_but(self.get_message("remove_others", player), player)

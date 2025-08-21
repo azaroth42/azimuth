@@ -52,6 +52,11 @@ class SimpleFileStorage(Storage):
         else:
             return None
 
+    def iter_ids(self):
+        for fn in os.listdir(self.directory):
+            if fn.endswith(self.suffix):
+                yield fn[: -len(self.suffix)]
+
     def load(self, what_id):
         fn = what_id.replace("/", self.slash_replacement)
         if not fn.endswith(self.suffix):
@@ -105,16 +110,18 @@ class SimpleFileStorage(Storage):
 
     def get_object_by_name(self, name, clss=None):
         # Use system `grep` to search files for name
-        cmd = f"grep '{name}' {self.directory}/*"
+        cmd = f"grep -i '{name}' {self.directory}/*"
         output = subprocess.check_output(cmd, shell=True).decode("utf-8")
         files = output.split("\n")
         files = [f.split(":")[0] for f in files if f]
-        print(f"grep: {files}")
         if len(files) == 1:
             fn = files[0].replace(f"{self.directory}/", "").replace(".json", "")
             return self.load(fn)
         elif len(files) > 1:
-            raise ValueError(f"Multiple files found for name '{name}'")
+            print(f"Multiple files found for name '{name}'")
+            return None
+        else:
+            return None
 
         # Brute force search of all objects
         files = os.listdir(self.directory)

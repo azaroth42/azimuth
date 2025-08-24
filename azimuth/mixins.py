@@ -273,6 +273,12 @@ class Positionable:
     @make_command(["put", "place", "position"], "any", ["on", "under", "beside", "next to"], "self")
     def position_object(self, player, target, prep=None, verb=None):
         print(f"saw: {verb} {target} {prep} {self.name}")
+        # test if target is able to be positioned
+        # if so, then update self.positioned
+
+    def look_at(self, player):
+        # return who/what is positioned where
+        return ""
 
 
 class Holdable:

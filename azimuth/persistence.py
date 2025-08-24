@@ -123,19 +123,13 @@ class SimpleFileStorage(Storage):
         else:
             return None
 
-        # Brute force search of all objects
-        files = os.listdir(self.directory)
-        for fn in files:
-            fn = os.path.join(self.directory, fn)
-            with open(fn) as fh:
-                data = json.load(fh)
-                if data["name"] == name:
-                    if clss:
-                        if data["class"] == clss.__name__:
-                            return self.load(fn)
-                    else:
-                        return self.load(fn)
-        return None
+    def get_all_objects(self, clss=None):
+        objs = []
+        for id in self.iter_ids():
+            obj = self.load(id)
+            if clss is None or "class" in obj and obj["class"] == clss.__name__:
+                objs.append(obj)
+        return objs
 
 
 class MlStorage(Storage):

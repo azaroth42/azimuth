@@ -201,6 +201,7 @@ class Place(BaseThing):
     def __init__(self, id, world, data, recursive=True):
         self.exits = {}  # exit command -> Exit Object
         super().__init__(id, world, data, recursive)
+        self.coordinates = data.get("coordinates", [0, 0, 0])
         if not self.exits and "exits" in data:
             for ex in data.get("exits", []):
                 xo = world.get_object(ex, recursive)
@@ -280,6 +281,7 @@ class Place(BaseThing):
         data.update(
             {
                 "exits": [x.id for x in self.exits.values()],  # List of Exit IDs
+                "coordinates": self.coordinates,
             }
         )
         return data
@@ -518,6 +520,9 @@ class Furniture(Object, Positionable):
         # Now call the mixins independently
         d2 = Positionable.look_at(self, who)
         return "\n".join([desc, d2])
+
+    def take_ok(self, player):
+        return False
 
 
 class Clothing(Object, Containable, Wearable):
@@ -831,6 +836,7 @@ class Programmer(Player):
         """@dump database to disk"""
         self.tell("Dumping database...")
         self.world.dump_database()
+        self.tell("Done.")
 
     @make_command("@messages", "any")
     def list_messages(self, player, target, prep=None, verb=None):
@@ -865,7 +871,7 @@ class Programmer(Player):
 
     @make_command("@teleport", "any")
     def teleport(self, player, target, prep=None, verb=None):
-        """@teleport target"""
+        """@teleport to target location"""
 
         if target.startswith("#"):
             place = self.world.get_object_by_id(target[1:], Place)

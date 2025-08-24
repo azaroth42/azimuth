@@ -143,6 +143,9 @@ class World:
         else:
             return data
 
+    def get_all_objects(self, clss=None):
+        return [self.make_instance(o) for o in self.db.get_all_objects(clss)]
+
     def get_object_by_id(self, id, clss=None):
         if not id:
             return None
@@ -426,6 +429,7 @@ def setup_world(db, world_id):
             {
                 "name": "The Starting Chamber",
                 "description": "A small, damp stone chamber. It feels like the beginning of an adventure.",
+                "coordinates": [0, 0, 0],
             },
         )
 
@@ -446,6 +450,7 @@ def setup_world(db, world_id):
             {
                 "name": "Narrow Hallway",
                 "description": "A dark, narrow hallway stretching north and south.",
+                "coordinates": [0, 1, 0],
             },
         )
         treasure_room = Place(
@@ -454,6 +459,7 @@ def setup_world(db, world_id):
             {
                 "name": "Glittering Cave",
                 "description": "A small cave sparkling with veins of quartz. A sturdy chest sits here.",
+                "coordinates": [1, 1, 0],
             },
         )
 

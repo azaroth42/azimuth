@@ -307,15 +307,6 @@ class World:
         if argstr in self.exit_names:
             argstr = self.exit_names[argstr]
 
-        search_order = [
-            player,
-            player.location,
-            *player.contents,
-            *player.location.contents,
-            *player.location.exits.values(),
-            self,
-        ]
-
         if ch0 in ["'", '"']:
             player.say(argstr[1:])
         elif w1 == "say":
@@ -336,6 +327,16 @@ class World:
                 player.tell("There is no such exit here")
         else:
             argstr = argstr.replace(w1, "", 1).strip()
+
+            search_order = [
+                player,
+                player.location,
+                *player.contents,
+                *player.location.contents,
+                *player.location.exits.values(),
+                self,
+            ]
+
             for s in search_order:
                 cmds = s.get_commands(w1)
                 for c in cmds.get(w1, []):
@@ -386,7 +387,7 @@ class World:
                     else:
                         # no prep, so no iobj
                         # and also not none ... so must be dobj
-                        if c["dobj"] == "self" and s.match_object(argstr, player):
+                        if c["dobj"] == "self" and s.match_object(argstr, player, verb=w1):
                             c["func"](s, player, prep=None, verb=w1)
                             return
                         elif c["dobj"] == "any":

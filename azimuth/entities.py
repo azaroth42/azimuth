@@ -97,8 +97,16 @@ class BaseThing:
     def on_leave(self, what):
         pass
 
-    def match_object(self, name, player):
+    def okay_for_verb(self, verb, player):
+        return True
+
+    def match_object(self, name, player, verb=None):
         # does name match this object?
+        if verb is not None:
+            # Test if we should match for the verb
+            if not self.okay_for_verb(verb, player):
+                return 0
+
         if name == "me" and player == self:
             return 1
         elif name == "here" and player and player.location == self:
@@ -440,6 +448,16 @@ class Object(BaseThing):
 
     def use_on_effect(self, player, target):
         return None
+
+    def okay_for_verb(self, verb, player):
+        if not player.can_see(self):
+            return False
+        if verb in ["get", "take", "pick"]:
+            if self.location != player.location:
+                return False
+        elif verb == "drop":
+            if self.location != player:
+                return False
 
     @make_command(["get", "take", "pick"], "self")
     def get(self, player, prep=None, verb=None):

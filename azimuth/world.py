@@ -305,7 +305,6 @@ class World:
         player = self.active_objects.get(player_id, None)
         if player is None:
             # ????!
-            print(f"Got no player for id {player_id}")
             return
 
         player.last_active_time = time.time()
@@ -347,10 +346,8 @@ class World:
             ]
 
             for s in search_order:
-                print(f"Command search on {s}")
                 cmds = s.get_commands(w1)
                 for c in cmds.get(w1, []):
-                    print(f"Found: {c}")
                     if len(words) == 1 and not any([c["dobj"], c["prep"], c["iobj"]]):
                         c["func"](s, player, prep=None, verb=w1)
                         return
@@ -403,7 +400,6 @@ class World:
                     else:
                         # no prep, so no iobj
                         # and also not none ... so must be dobj
-                        print(s.match_object(argstr, player, verb=w1))
                         if c["dobj"] == "self" and s.match_object(
                             argstr, player, verb=w1
                         ):

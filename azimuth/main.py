@@ -6,7 +6,6 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
-from fastapi_mcp import FastApiMCP
 
 from .persistence import MlStorage, SimpleFileStorage
 from .world import setup_world
@@ -34,6 +33,8 @@ elif db_type == "marklogic":
     password = os.getenv("AZIMUTH_ML_PASSWORD")
     dbname = os.getenv("AZIMUTH_ML_DB", "azimuth")
     db = MlStorage(url, user, password, dbname)
+else:
+    raise ValueError(f"Unknown DB type: {db_type}")
 
 world = setup_world(db, world_id)
 if not world:
@@ -47,7 +48,7 @@ world.socketio = sio
 # --- Web Client ---
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html")
 
 
 # Inspect the database

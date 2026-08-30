@@ -25,23 +25,28 @@ class GetObjectTest(AzimuthTest):
     def test_get_sword(self):
         """The reported bug: 'get sword' did nothing for a logged-in player."""
         wiz = self.wizard()
+        self.place_object("rusty sword", "The Starting Chamber")
         self.assert_msg(wiz.send("look"), "The Starting Chamber")
         self.assert_msg(wiz.send("get sword"), "You take rusty sword.")
         assert "rusty sword" in wiz.inventory()
 
     def test_get_alias_take(self):
         wiz = self.wizard()
+        self.place_object("rusty sword", "The Starting Chamber")
         self.assert_msg(wiz.send("take sword"), "You take rusty sword.")
         assert "rusty sword" in wiz.inventory()
 
     def test_get_invisible(self):
         """An object in another room must not match."""
         wiz = self.wizard()
+        self.place_object("iron key", "Narrow Hallway")  # not visible from here
         assert "iron key" not in wiz.inventory()
         self.assert_msg(wiz.send("get key"), "I don't understand that.")
 
     def test_take_from_container(self):
         wiz = self.wizard()
+        self.place_object("sturdy chest", "Glittering Cave")
+        self.place_object("shiny gem", "sturdy chest")
         self.assert_msg(
             wiz.send("@teleport Glittering Cave"), "Teleporting to Glittering Cave"
         )
@@ -52,6 +57,7 @@ class GetObjectTest(AzimuthTest):
 class DropObjectTest(AzimuthTest):
     def test_take_then_drop(self):
         wiz = self.wizard()
+        self.place_object("rusty sword", "The Starting Chamber")
         self.assert_msg(wiz.send("get sword"), "You take rusty sword.")
         self.assert_msg(wiz.send("drop sword"), "You drop rusty sword.")
         assert "rusty sword" not in wiz.inventory()
@@ -62,6 +68,7 @@ class DropObjectTest(AzimuthTest):
         """Document current semantics: 'drop' requires an explicit object;
         a bare 'drop' does not auto-target the carried item."""
         wiz = self.wizard()
+        self.place_object("rusty sword", "The Starting Chamber")
         self.assert_msg(wiz.send("get sword"), "You take rusty sword.")
         self.assert_msg(wiz.send("drop"), "I don't understand that.")
         assert "rusty sword" in wiz.inventory()  # still carrying it
@@ -77,6 +84,7 @@ class CommandRegistrationTest(AzimuthTest):
 
     def test_no_duplicate_entries(self):
         wiz = self.wizard()
+        self.place_object("rusty sword", "The Starting Chamber")
         sword = wiz.send("get sword")  # now carried; exercises its full MRO
         for thing in [self.tw.world, wiz.player, wiz.player.location, *wiz.player.contents]:
             cmds = thing.get_commands()

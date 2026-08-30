@@ -7,6 +7,7 @@ python-multipart>=0.0.6
 requests
 werkzeug>=2.0.0
 rich>=10.0.0
+textual>=8.2.0
 fastapi_mcp
 # fastapi-mcp 0.4.x calls mcp's Server() with a positional version arg,
 # which was removed in mcp 2.x -- pin to 1.x until fastapi-mcp is updated

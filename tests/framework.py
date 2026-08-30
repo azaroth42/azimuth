@@ -172,9 +172,20 @@ class AzimuthTest:
         self.session = None
 
     def wizard(self) -> Session:
-        """Log in (once) as the built-in wizard programmer."""
+        """Log in (once) as the built-in wizard programmer.
+
+        The wizard is then moved to the start room: the real (copied) world
+        remembers whatever room the wizard last played in, and tests assume
+        the start room.
+        """
         if self.session is None:
             self.session = self.tw.login("wizard", "wizard")
+            if self.session.player is not None:
+                start = self.tw.world.get_object(
+                    self.tw.world.config["start_room_id"]
+                )
+                if start is not None and self.session.player.location is not start:
+                    self.session.player.move_to(start)
         return self.session
 
     def assert_msg(self, msgs, *want, absent=()):
@@ -188,6 +199,39 @@ class AzimuthTest:
         for a in absent:
             assert a not in text, f"did not expect {a!r} in output:\n{text}"
         return text
+
+    def place_object(self, name, where=None):
+        """Test precondition: move a named object to `where`, wherever it is.
+
+        The test world is a copy of the real db/, which actual play may have
+        rearranged (the sword might be in someone's inventory). Tests that
+        assume a layout should restore their preconditions with this rather
+        than relying on the copied state. `where` may be an object or the
+        name of one. Returns the moved object.
+        """
+        w = self.tw.world
+        obj = None
+        for o in w.active_objects.values():
+            if o.name == name:
+                obj = o
+                break
+        if obj is None:
+            for data in w.db.get_all_objects():
+                if data.get("name") == name:
+                    obj = w.make_instance(data)
+        assert obj is not None, f"could not find object {name!r} in test world"
+        if where is not None:
+            if isinstance(where, str):
+                where_name = where
+                for o in w.active_objects.values():
+                    if o.name == where:
+                        where = o
+                        break
+                else:
+                    where = w.get_object_by_name(where)
+                assert where is not None, f"could not resolve {where_name!r}"
+            obj.move_to(where)
+        return obj
 
 
 def run_tests(pattern=None, keep_db=False):

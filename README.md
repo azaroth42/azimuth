@@ -14,14 +14,19 @@ The design goals that fell out of that:
   object's class can even be *reassigned at runtime* via `@chparent`.
 - **A MOO-style programmer tier** — a `Programmer` player gets `eval`, `@create`,
   `@dig`, `@message` and friends for building and editing the world from inside the MUD.
-- **AI-native** — the world is exposed over MCP so LLM agents can inspect it, and an
-  LLM-driven Room Builder agent can generate whole environments from a single sentence.
+- **AI-native** — an LLM-driven Room Builder agent can generate whole environments
+  from a single sentence; an MCP mount for agent inspection is present but
+  currently disabled (see below).
+
+**Deep-dive:** [ARCHITECTURE.md](ARCHITECTURE.md) documents the subsystems, the
+current state, the known bugs (one is fully diagnosed and ready to fix), and how
+to set up on a new machine. Start there before making non-trivial changes.
 
 ## Architecture
 
 | Component | File | Role |
 |---|---|---|
-| Server | [azimuth/main.py](azimuth/main.py) | FastAPI + Socket.IO ASGI app, plus MCP |
+| Server | [azimuth/main.py](azimuth/main.py) | FastAPI + Socket.IO ASGI app (MCP mount currently disabled) |
 | World engine | [azimuth/world.py](azimuth/world.py) | Object cache, lazy loading, login, command dispatch |
 | Command system | [azimuth/command_decorator.py](azimuth/command_decorator.py) | `@make_command` registration and resolution |
 | Object model | [azimuth/entities.py](azimuth/entities.py), [azimuth/mixins.py](azimuth/mixins.py) | `Place`/`Exit`/`Object`/`Player` + capability mixins |
@@ -36,9 +41,12 @@ three surfaces:
 1. **Socket.IO** — real-time player I/O (`connect` sends the MOTD + login prompt;
    `command` dispatches to the world; `disconnect` persists the player's location).
 2. **Web client** — `GET /` serves a terminal-style browser client.
-3. **MCP** — `fastapi_mcp` is mounted, exposing `GET /data/{id}` (`get_record`) and
-   `GET /search/{name}` (`search_record`) as MCP tools so AI agents can look up
-   world objects by UUID or name. (This is why the server moved from Flask to FastAPI.)
+3. **MCP — currently disabled** — the `FastApiMCP(...)` / `mcp.mount()` lines in
+   `main.py` are commented out; re-enabling is two uncomments. (This is why the
+   server moved from Flask to FastAPI.) `requirements.txt` pins `mcp<2` because
+   fastapi-mcp 0.4.x is incompatible with the mcp 2.x `Server()` signature. The
+   underlying REST endpoints (`GET /data/{id}`, `GET /search/{name}`) still work
+   standalone.
 
 **World.** `World` keeps an in-memory cache of active objects and lazily loads the
 rest from the persistence layer. On first start it bootstraps a demo world (three
@@ -72,17 +80,23 @@ All active objects are dumped back to storage on server shutdown and on disconne
 ## Running
 
 ```bash
-pip install -r requirements.txt
-python run.py        # server on 0.0.0.0:5001 (uvicorn, with --reload)
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt prompt_toolkit
+.venv/bin/python run-tests.py      # verify: 14/14 passed
+.venv/bin/python run.py            # server on 0.0.0.0:5001 (uvicorn, --reload)
 ```
 
 Then connect with either client:
 
 ```bash
-python client.py     # text client (prompt_toolkit; not in requirements.txt yet)
+.venv/bin/python client.py     # text client
 ```
 
 or open <http://localhost:5001/> for the browser terminal.
+
+**Moving machines?** `db/` (world state), `.env`, and `.venv` are all gitignored —
+copy `db/` and `.env` out of band, and recreate the venv on the new box. If `db/`
+is absent, a fresh demo world is bootstrapped on first start.
 
 Log in as **wizard / wizard** to get a Programmer, or `register <username>
 <password> <email>` for a regular player. (The wizard's hash is baked in when a new
@@ -154,22 +168,29 @@ the in-process API and will not run. See *Known issues* below.
 
 ## Known issues
 
+- **Verb shadowing (the big one)** — the dispatcher tries command entries
+  shallowest-first, so on a `LockableExit` a locked door *opens as if unlocked*
+  and a closed door *can be walked through*. Fully diagnosed with root cause, fix
+  options, and the tests to add in [ARCHITECTURE.md §7](ARCHITECTURE.md).
 - `run-agent.py` references methods that no longer exist on `RoomBuilderAgent`
   (`connect_to_mud`, `login`, `send_command`, …) and imports from the wrong path.
 - `run-repl.py` builds the agent but never invokes it (no `__main__` block).
-- `World.handle_login` raises `KeyError` on unknown usernames instead of replying
-  "Username and password do not match" — a bad login gets no response.
 - `prompt_toolkit` (needed by the text client) and the spaCy/bagpipes deps for the
   parser experiment are missing from `requirements.txt`.
 - `MlStorage` bakes its own web API path (`http://localhost:5001/data/`) into the
   MarkLogic document URIs.
+- See [ARCHITECTURE.md §8](ARCHITECTURE.md) for the rest (stub commands, the
+  grep-based name search, the reload watcher, …).
 
 ## Ongoing work
 
 - ~~Use uvicorn or other non-sucky server framework~~ — done (uvicorn + FastAPI)
-- Finish the stub commands (whisper, positioning, `Positionable.look_at`, …)
+- ~~`handle_login` KeyError on unknown usernames~~ — done (`.get()`)
+- ~~`get_commands` double-merging inherited `default_commands`~~ — done (`__dict__` guard + tests)
+- **Fix the verb-shadowing dispatch bug** ([ARCHITECTURE.md §7](ARCHITECTURE.md))
+- Finish the stub commands (whisper, positioning, `Positionable.look_at`, levers)
 - Wire the spaCy parser in for robust command interpretation
-- MCP: read tools work; write actions (create/modify objects) still to come
+- Re-enable the MCP mount; add write actions (create/modify objects)
 - Clean up the agent scripts (`run-agent.py`, `run-repl.py`) around the in-process design
 - More robust persistence — Redis, Postgres, or other real databases
 - AI agents that play, not just build

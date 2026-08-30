@@ -245,9 +245,13 @@ through the normal entity constructors. `run-repl.py` is the in-process seed
 remote-socket-client design (wrong imports, methods that no longer exist) —
 either rewrite or delete it.
 
-## 7. Open bug: verb shadowing — the dispatcher runs the *shallowest* handler
+## 7. Verb shadowing — dispatcher ran the *shallowest* handler (**FIXED**)
 
-**Status: diagnosed, not yet fixed. This is the recommended next task.**
+**Status: fixed.** The dispatcher now iterates verb entries with
+`reversed(...)` (deepest-first) in `World.process_player_command`, and two
+necessary companion fixes landed with it (see *The fix* below). Six
+regression tests in `tests/test_exits.py` (`DoorTest`) pin the behavior.
+The symptom/root-cause write-up below is kept so the *why* isn't lost.
 
 ### Symptom
 
@@ -283,48 +287,55 @@ re-merging an ancestor dict) is **fixed** via the `c.__dict__.get(...)` guard in
 `get_commands` and is covered by `CommandRegistrationTest`. This bug is about
 *ordering among distinct handlers*, which that fix deliberately left in place.
 
-### Fix options (pick one; add the tests either way)
+### The fix (what was done)
 
-**A. Reverse the dispatch (one line, world.py):**
-```python
-for c in reversed(cmds.get(w1, [])):
-```
-Deepest matching handler wins — matches Python MRO intuition. Cheap to try;
-audit the verbs it affects: `look` (BaseThing vs Place — effectively identical,
-since `BaseThing.look` calls `self.look_at()` dynamically), `go`/`open`/`close`
-(the intended fixes), `take`/`get`/`remove` (Object vs Containable — *different*
-structures, unaffected). The risk is any verb where a shallow handler should
-legitimately win; none is known, but run the suite + manual pass.
+1. **`azimuth/world.py`** — the dispatch loop is now
+   `for c in reversed(cmds.get(w1, [])):` with an explanatory comment. Deepest
+   matching handler wins, matching Python MRO intuition. This is the only place
+   entry order matters; distinct argument structures (`Object` "get self" vs
+   `Containable` "get Object from self") are unaffected because they never
+   match the same input shape. Verified no regressions: the full suite
+   (get/drop/take-from/login/registration) passes unchanged.
+2. **`azimuth/entities.py`** — `LockableExit.__init__` now explicitly calls
+   `Lockable.__init__` after `super().__init__`. Without it, the diamond
+   (`super()` inside `OpenableExit` chains to `Exit`, never `Lockable`) meant
+   `LockableExit` instances had **no `is_locked` attribute at all** — any
+   locked-aware code path crashed with `AttributeError`.
+3. **`azimuth/mixins.py`** — `Lockable.lock`/`lock_with` checked `self.open`,
+   which on an exit resolves to the `OpenableExit.open` **method** (always
+   truthy): every lock attempt printed "must close first" *and* locked anyway
+   (the `toggle_on` call sat outside the if/elif). Both now check
+   `self.is_open` and `return` after failure messages.
 
-**B. Structure-aware dedup in `get_commands` (surgical, entities.py):** after
-merging, for each verb drop entries whose `(dobj, prep, iobj)` signature
-duplicates a *later* (deeper) entry — keep the deepest. Distinct structures
-(`Object` "get self" vs `Containable` "get Object from self") are preserved.
-Same behavioral outcome as A for true overrides, but the merged lists are also
-cleaner for any future consumer.
+### Tests (in `tests/test_exits.py`, `DoorTest`)
 
-Recommended: **try A first** (smallest diff, dispatcher is the only place order
-matters), then re-run `run-tests.py` and the manual checks below.
+Two throwaway rooms joined by a `LockableExit` (closed by default), wizard at
+the source side — 6 tests:
 
-### Tests to add (in `tests/`, regardless of fix chosen)
+- `go` through a closed door → fails with `go_fail_closed` (was: walked through)
+- `open` a locked door → fails with `open_fail_locked`, stays closed (was: opened)
+- open+unlocked door → `go` works (normal path preserved)
+- `open`/`close` announce `*_destination` to a player on the far side
+- `lock` a closed door → locks silently, no bogus "must close" message
+- `lock` an open door → refuses, stays unlocked
 
-Model on `_make_lockable_exit` in `tests/test_objects.py`, but with real
-source/destination places (two rooms + `OpenableExit`/`LockableExit` between
-them) and a player standing at the source:
-
-1. Close the exit → `go <exit>` must fail with `go_fail_closed`
-   ("You cannot go through that, it's closed.").
-2. Lock it → `open <exit>` must fail with `open_fail_locked`
-   ("You must unlock {self} first before opening it.").
-3. Unlock + open from one side → the destination room must receive
-   `open_destination` ("{player} opens {self} from the other side.").
-4. (After fix) `close` must announce `close_destination` similarly.
-
-Run the full suite to catch regressions in `GetObjectTest`/`DropObjectTest`/
-`CommandRegistrationTest`/`LoginTest`.
+Door lock state is set directly in the tests where the `lock` command path
+isn't under test.
 
 ## 8. Other known issues (curated)
 
+- **`Lockable` message keys missing** — `StateToggle.toggle_on/off` emits
+  `toggle_locked_on`/`toggle_locked_off`/`*_others`, none of which exist in
+  `Lockable.default_messages`; `get_message` falls back to `""`, so `lock`/
+  `unlock` reply with a blank line. Adding the keys is a one-liner each.
+- **`unlock` shares the old pattern** — failure message then unconditional
+  `toggle_off` (no `return`); only bites when `locked_by_player` is set, which
+  nothing in the current world does. Mirror the `lock` fix if you wire up
+  lock-keys.
+- **The `open` name collision is a live hazard** — the method fix above covers
+  `lock`/`lock_with`, but anywhere else code does `if self.open` on an exit it
+  gets a truthy method. Use `self.is_open`. (Renaming the command methods to
+  e.g. `do_open` would defuse it for good.)
 - **`Positionable` is a stub** — `sit/stand/…` handlers just print `saw: …`;
   `Positionable.look_at` returns `""`.
 - **`whisper` is an empty stub** on `Player` (registered, does nothing).
@@ -344,11 +355,13 @@ Run the full suite to catch regressions in `GetObjectTest`/`DropObjectTest`/
 
 ## 9. Suggested next steps (roughly in order)
 
-1. **Fix the §7 verb-shadowing bug** + its tests.
-2. Narrow `run.py`'s reload watch dirs; add `prompt_toolkit` to requirements.
-3. Rewrite-or-delete `run-agent.py`; give `run-repl.py` a real main loop.
-4. Re-enable the MCP mount (§6.1) and add *write* actions (create/modify) —
+1. ~~Fix the §7 verb-shadowing bug + its tests~~ — done.
+2. Tidy the §8 door nits (missing `Lockable` message keys, `unlock` pattern,
+   optionally rename the `open` command methods).
+3. Narrow `run.py`'s reload watch dirs; add `prompt_toolkit` to requirements.
+4. Rewrite-or-delete `run-agent.py`; give `run-repl.py` a real main loop.
+5. Re-enable the MCP mount (§6.1) and add *write* actions (create/modify) —
    read tools are the two GET endpoints only.
-5. Finish `Positionable`/`Switchable` (sit/stand, levers) and `whisper`.
-6. Wire in `experiments/spacy_parser.py` to replace the preposition-split parser.
-7. More robust persistence (Redis/Postgres) if file+MarkLogic feel limiting.
+6. Finish `Positionable`/`Switchable` (sit/stand, levers) and `whisper`.
+7. Wire in `experiments/spacy_parser.py` to replace the preposition-split parser.
+8. More robust persistence (Redis/Postgres) if file+MarkLogic feel limiting.

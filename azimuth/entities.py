@@ -434,7 +434,12 @@ class OpenableExit(Exit, Openable):
 
 # Need the overrides for open/close for exits
 class LockableExit(OpenableExit, Lockable):
-    pass
+    def __init__(self, id, world, data, recursive=True):
+        super().__init__(id, world, data, recursive)
+        # super() only chains OpenableExit -> Exit; Lockable's own __init__
+        # (is_locked, locked_by_*, ...) is never called through the diamond,
+        # so invoke it explicitly -- same pattern as OpenableContainer.
+        Lockable.__init__(self, id, world, data, recursive)
 
 
 # --- Object Class ---

@@ -139,10 +139,14 @@ class Lockable(Openable):
 
     @make_command("lock", "self")
     def lock(self, player, prep=None, verb=None):
-        if self.open:
+        # Note: self.open must be self.is_open -- on a LockableExit the name
+        # 'open' resolves to the OpenableExit.open *method* (always truthy).
+        if self.is_open:
             player.tell(self.get_message("lock_fail_open", player))
+            return
         elif self.locked_by_player not in [None, player]:
             player.tell(self.get_message("lock_fail_player", player))
+            return
         self.toggle_on("locked", player)
 
     @make_command("unlock", "self")
@@ -154,7 +158,7 @@ class Lockable(Openable):
 
     @make_command("lock", "self", ["with", "using"], "Object")
     def lock_with(self, player, prep=None, verb=None):
-        if self.open:
+        if self.is_open:
             player.tell(self.get_message("lock_fail_open", player))
         elif self.locked_by_player not in [None, player]:
             player.tell(self.get_message("lock_fail_player", player))

@@ -168,10 +168,8 @@ the in-process API and will not run. See *Known issues* below.
 
 ## Known issues
 
-- **Verb shadowing (the big one)** — the dispatcher tries command entries
-  shallowest-first, so on a `LockableExit` a locked door *opens as if unlocked*
-  and a closed door *can be walked through*. Fully diagnosed with root cause, fix
-  options, and the tests to add in [ARCHITECTURE.md §7](ARCHITECTURE.md).
+- Door-state nits remain after the verb-shadowing fix (blank `lock`/`unlock`
+  replies, the `open` name collision) — see [ARCHITECTURE.md §8](ARCHITECTURE.md).
 - `run-agent.py` references methods that no longer exist on `RoomBuilderAgent`
   (`connect_to_mud`, `login`, `send_command`, …) and imports from the wrong path.
 - `run-repl.py` builds the agent but never invokes it (no `__main__` block).
@@ -187,7 +185,7 @@ the in-process API and will not run. See *Known issues* below.
 - ~~Use uvicorn or other non-sucky server framework~~ — done (uvicorn + FastAPI)
 - ~~`handle_login` KeyError on unknown usernames~~ — done (`.get()`)
 - ~~`get_commands` double-merging inherited `default_commands`~~ — done (`__dict__` guard + tests)
-- **Fix the verb-shadowing dispatch bug** ([ARCHITECTURE.md §7](ARCHITECTURE.md))
+- ~~Verb-shadowing dispatch bug~~ — done (`reversed(...)` dispatch + `LockableExit.__init__` chain + `lock` command; [ARCHITECTURE.md §7](ARCHITECTURE.md))
 - Finish the stub commands (whisper, positioning, `Positionable.look_at`, levers)
 - Wire the spaCy parser in for robust command interpretation
 - Re-enable the MCP mount; add write actions (create/modify objects)

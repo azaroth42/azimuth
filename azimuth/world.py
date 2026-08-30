@@ -347,7 +347,15 @@ class World:
 
             for s in search_order:
                 cmds = s.get_commands(w1)
-                for c in cmds.get(w1, []):
+                # Try entries deepest-first: get_commands merges class commands
+                # shallowest-ancestor-first, and the first structural match
+                # wins, so the list must be walked in reverse. Otherwise a
+                # generic ancestor handler (e.g. Exit.use, Openable.open) runs
+                # before the specialized override (OpenableExit.use's closed
+                # check, Lockable.open's lock check) -- a locked door would
+                # open, and a closed door would be walkable. See
+                # ARCHITECTURE.md §7.
+                for c in reversed(cmds.get(w1, [])):
                     if len(words) == 1 and not any([c["dobj"], c["prep"], c["iobj"]]):
                         c["func"](s, player, prep=None, verb=w1)
                         return

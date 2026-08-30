@@ -75,11 +75,11 @@ class BaseThing:
         d = self.to_dict()
         self.world.save(d)
 
-    def look_at(self, who=None):
+    def look_at(self, who):
         """Returns the description of the thing."""
         return self.description
 
-    def contained_look_at(self, who=None):
+    def contained_look_at(self, who):
         return ""
 
     def move_to(self, where):
@@ -114,7 +114,6 @@ class BaseThing:
         if verb is not None:
             # Test if we should match for the verb
             if not self.okay_for_verb(verb, player):
-                print("failed match for verb")
                 return 0
 
         if name == "me" and player == self:
@@ -129,9 +128,6 @@ class BaseThing:
             namebits = self.name.lower().split()
             if namebits[-1] not in names:
                 names.append(namebits[-1])
-
-        print(name)
-        print(names)
 
         if type(name) is str:
             name = name.lower()
@@ -274,18 +270,18 @@ class Place(BaseThing):
             if c not in who and hasattr(c, "tell"):
                 c.tell(msg)
 
-    def look_at(self, player):
+    def look_at(self, who):
         """Generates a description of the place, its contents, and exits"""
         desc = []
         desc.append(f"--- {self.name} ---")
-        desc.append(super().look_at(player))
+        desc.append(super().look_at(who))
         desc.append("")
 
         # List visible contents (excluding the player looking)
         visible_content_names = []
         for item in self.contents:
-            if item != player:  # Don't list the player themselves
-                if player.can_see(item):
+            if item != who:  # Don't list the player themselves
+                if who.can_see(item):
                     visible_content_names.append(item.name)
         if visible_content_names:
             desc.append(f"You see here: {', '.join(visible_content_names)}.\n")
@@ -591,7 +587,7 @@ class Clothing(Object, Containable, Wearable):
         d2 = Wearable.look_at(self, who)
         return "\n".join([desc, d2])
 
-    def contained_look_at(self, who=None):
+    def contained_look_at(self, who):
         return Wearable.contained_look_at(self, who)
 
 

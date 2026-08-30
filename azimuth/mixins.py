@@ -20,7 +20,9 @@ class StateToggle:
         else:
             setattr(self, f"is_{which}", True)
             player.tell(self.get_message(f"toggle_{which}_on", player))
-            player.location.announce_all_but(self.get_message(f"toggle_{which}_on_others", player), player)
+            player.location.announce_all_but(
+                self.get_message(f"toggle_{which}_on_others", player), player
+            )
             return True
         return False
 
@@ -32,7 +34,9 @@ class StateToggle:
         else:
             setattr(self, f"is_{which}", False)
             player.tell(self.get_message(f"toggle_{which}_off", player))
-            player.location.announce_all_but(self.get_message(f"toggle_{which}_off_others", player), player)
+            player.location.announce_all_but(
+                self.get_message(f"toggle_{which}_off_others", player), player
+            )
             return True
         return False
 
@@ -79,11 +83,11 @@ class Openable(StateToggle):
         if ok and self.open_paired_object is not None:
             self.open_paired_object.is_open = False
 
-    def look_at(self, player):
+    def look_at(self, who):
         if self.is_open:
-            return self.get_message("open_look_at", player)
+            return self.get_message("open_look_at", who)
         else:
-            return self.get_message("closed_look_at", player)
+            return self.get_message("closed_look_at", who)
 
     def to_dict(self):
         """Returns a dictionary representation of the exit."""
@@ -91,7 +95,9 @@ class Openable(StateToggle):
         data.update(
             {
                 "open": self.is_open,
-                "open_paired_object": self.open_paired_object.id if self.open_paired_object else None,
+                "open_paired_object": self.open_paired_object.id
+                if self.open_paired_object
+                else None,
             }
         )
         return data
@@ -126,7 +132,7 @@ class Lockable(Openable):
 
     @make_command("open", "self")
     def open(self, player, prep=None, verb=None):
-        if self.locked:
+        if self.is_locked:
             player.tell(self.get_message("open_fail_locked", player))
         else:
             return super().open(player)
@@ -182,9 +188,15 @@ class Lockable(Openable):
         data.update(
             {
                 "is_locked": self.is_locked,
-                "locked_by_object": self.locked_by_object.id if self.locked_by_object else None,
-                "locked_by_player": self.locked_by_player.id if self.locked_by_player else None,
-                "lock_paired_object": self.lock_paired_object.id if self.lock_paired_object else None,
+                "locked_by_object": self.locked_by_object.id
+                if self.locked_by_object
+                else None,
+                "locked_by_player": self.locked_by_player.id
+                if self.locked_by_player
+                else None,
+                "lock_paired_object": self.lock_paired_object.id
+                if self.lock_paired_object
+                else None,
             }
         )
         return data
@@ -215,7 +227,9 @@ class Containable:
         else:
             what.move_to(self)
             player.tell(self.get_message("put_in", player, what))
-            player.location.announce_all_but(self.get_message("put_in_others", player, what), player)
+            player.location.announce_all_but(
+                self.get_message("put_in_others", player, what), player
+            )
 
     @make_command(["take", "get", "remove"], "Object", "from", "self")
     def take_from(self, player, target, prep=None, verb=None):
@@ -226,7 +240,9 @@ class Containable:
         else:
             what.move_to(player)
             player.tell(self.get_message("take_from", player, what))
-            player.location.announce_all_but(self.get_message("take_from_others", player, what), player)
+            player.location.announce_all_but(
+                self.get_message("take_from_others", player, what), player
+            )
 
     @make_command(["look", "l"], "any", "in", "self")
     def look_at_in(self, player, target=None, prep=None, verb=None):
@@ -270,7 +286,12 @@ class Positionable:
     def position_self(self, player, prep=None, verb=None):
         print(f"saw: {verb} ___ {prep} {self.name}")
 
-    @make_command(["put", "place", "position"], "any", ["on", "under", "beside", "next to"], "self")
+    @make_command(
+        ["put", "place", "position"],
+        "any",
+        ["on", "under", "beside", "next to"],
+        "self",
+    )
     def position_object(self, player, target, prep=None, verb=None):
         print(f"saw: {verb} {target} {prep} {self.name}")
         # test if target is able to be positioned
@@ -320,7 +341,9 @@ class Holdable:
         else:
             self.held_by = player
             player.tell(self.get_message("wield", player))
-            player.location.announce_all_but(self.get_message("wield_others", player), player)
+            player.location.announce_all_but(
+                self.get_message("wield_others", player), player
+            )
 
     @make_command(["unwield", "remove"], "self")
     def unwield(self, player, prep=None, verb=None):
@@ -331,7 +354,9 @@ class Holdable:
         else:
             self.held_by = None
             player.tell(self.get_message("unwield", player))
-            player.location.announce_all_but(self.get_message("unwield_others", player), player)
+            player.location.announce_all_but(
+                self.get_message("unwield_others", player), player
+            )
 
 
 class Wearable:
@@ -374,7 +399,9 @@ class Wearable:
         else:
             self.worn_by = player
             player.tell(self.get_message("wear", player))
-            player.location.announce_all_but(self.get_message("wear_others", player), player)
+            player.location.announce_all_but(
+                self.get_message("wear_others", player), player
+            )
 
     @make_command("remove", "self")
     def remove(self, player, prep=None, verb=None):
@@ -385,4 +412,6 @@ class Wearable:
         else:
             self.worn_by = None
             player.tell(self.get_message("remove", player))
-            player.location.announce_all_but(self.get_message("remove_others", player), player)
+            player.location.announce_all_but(
+                self.get_message("remove_others", player), player
+            )

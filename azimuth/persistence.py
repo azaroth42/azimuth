@@ -31,8 +31,8 @@ class DictStorage(Storage):
 
 
 class SimpleFileStorage(Storage):
-    def __init__(self):
-        self.directory = "db"
+    def __init__(self, directory="db"):
+        self.directory = directory
         self.suffix = ".json"
         self.slash_replacement = "___"
         self.key = "id"

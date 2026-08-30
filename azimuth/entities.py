@@ -1,10 +1,19 @@
-import uuid
-from werkzeug.security import check_password_hash
-import inspect
 import copy
-from azimuth.mixins import Openable, Lockable, Containable, Positionable, Holdable, Wearable
-from azimuth.command_decorator import make_command
+import inspect
 import time
+import uuid
+
+from werkzeug.security import check_password_hash
+
+from azimuth.command_decorator import make_command
+from azimuth.mixins import (
+    Containable,
+    Holdable,
+    Lockable,
+    Openable,
+    Positionable,
+    Wearable,
+)
 
 
 # --- Base Class ---
@@ -105,6 +114,7 @@ class BaseThing:
         if verb is not None:
             # Test if we should match for the verb
             if not self.okay_for_verb(verb, player):
+                print("failed match for verb")
                 return 0
 
         if name == "me" and player == self:
@@ -119,6 +129,9 @@ class BaseThing:
             namebits = self.name.lower().split()
             if namebits[-1] not in names:
                 names.append(namebits[-1])
+
+        print(name)
+        print(names)
 
         if type(name) is str:
             name = name.lower()
@@ -149,12 +162,16 @@ class BaseThing:
 
         msg = self.messages.get(
             which,
-            self.default_messages.get(which, self.world.default_messages.get(which, "")),
+            self.default_messages.get(
+                which, self.world.default_messages.get(which, "")
+            ),
         )
         # FIXME: allow more flexible messages
         if what is not None:
             # player has used key on chest
-            return msg.format(**{"player": who.name, "self": self.name, "object": what.name})
+            return msg.format(
+                **{"player": who.name, "self": self.name, "object": what.name}
+            )
         else:
             # player has left through north
             return msg.format(**{"player": who.name, "self": self.name})
@@ -167,7 +184,14 @@ class BaseThing:
             classes = list(inspect.getmro(self.__class__)[:-1])
             classes.reverse()
             for c in classes:
-                for vb, info in c.default_commands.items():
+                # Only merge commands the class declares itself. Attribute
+                # access (c.default_commands) would also return a parent's
+                # dict for classes that declare none, merging the same
+                # entries a second time further up the MRO.
+                own = c.__dict__.get("default_commands")
+                if own is None:
+                    continue
+                for vb, info in own.items():
                     try:
                         cmds[vb].extend(copy.deepcopy(info))
                     except Exception:
@@ -347,7 +371,9 @@ class Exit(BaseThing):
             player.move_to(dest)
             if player.location == dest:
                 self.source.announce(self.get_message("leave_others", player))
-                self.destination.announce_all_but(self.get_message("arrive_others", player), player)
+                self.destination.announce_all_but(
+                    self.get_message("arrive_others", player), player
+                )
             else:
                 player.tell(self.get_message("leave_fail_destination", player))
 
@@ -454,10 +480,12 @@ class Object(BaseThing):
             return False
         if verb in ["get", "take", "pick"]:
             if self.location != player.location:
+                print("failed match for location")
                 return False
         elif verb == "drop":
             if self.location != player:
                 return False
+        return True
 
     @make_command(["get", "take", "pick"], "self")
     def get(self, player, prep=None, verb=None):
@@ -470,7 +498,9 @@ class Object(BaseThing):
             self.move_to(player)
             if self.location == player:
                 player.tell(self.get_message("take", player))
-                player.location.announce_all_but(self.get_message("take_others", player), player)
+                player.location.announce_all_but(
+                    self.get_message("take_others", player), player
+                )
             else:
                 player.tell(self.get_message("take_fail", player))
 
@@ -484,7 +514,9 @@ class Object(BaseThing):
             self.move_to(player.location)
             if self.location == player.location:
                 player.tell(self.get_message("drop", player))
-                player.location.announce_all_but(self.get_message("drop_others", player), player)
+                player.location.announce_all_but(
+                    self.get_message("drop_others", player), player
+                )
             else:
                 player.tell(self.get_message("drop_fail", player))
 
@@ -506,7 +538,9 @@ class Object(BaseThing):
                 self.use_on_effect(player, target)
             # FIXME: How to get good messages with target??
             player.tell(self.get_message("use", player))
-            player.location.announce_all_but(self.get_message("use_others", player), player)
+            player.location.announce_all_but(
+                self.get_message("use_others", player), player
+            )
 
 
 # --- Container Class ---
@@ -635,7 +669,11 @@ class Player(BaseThing):
         elif name == "here":
             return self.location
         else:
-            for x in [*self.contents, *self.location.contents, *self.location.exits.values()]:
+            for x in [
+                *self.contents,
+                *self.location.contents,
+                *self.location.exits.values(),
+            ]:
                 if x.match_object(name, self):
                     return x
         return None
@@ -679,7 +717,9 @@ class Player(BaseThing):
     def who(self, player, target=None, prep=None, verb=None):
         for p in self.world.active_sids.values():
             pl = self.world.active_objects[p]
-            player.tell(f"{pl.name}    {pl.location.name}   {int(time.time() - pl.last_active_time)} seconds ago")
+            player.tell(
+                f"{pl.name}    {pl.location.name}   {int(time.time() - pl.last_active_time)} seconds ago"
+            )
 
     @make_command("@quit")
     def quit(self, player, target=None, prep=None, verb=None):

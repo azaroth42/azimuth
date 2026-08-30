@@ -1,10 +1,11 @@
 import os
-from azimuth.persistence import SimpleFileStorage, MlStorage
-from azimuth.world import setup_world
+
 import dotenv
 
 from azimuth.agents.config import AgentConfig
 from azimuth.agents.room_builder import RoomBuilderAgent
+from azimuth.persistence import MlStorage, SimpleFileStorage
+from azimuth.world import setup_world
 
 dotenv.load_dotenv()
 world_id = os.getenv("AZIMUTH_WORLD_ID", "WORLD1")
@@ -18,6 +19,8 @@ elif db_type == "marklogic":
     password = os.getenv("AZIMUTH_ML_PASSWORD")
     dbname = os.getenv("AZIMUTH_ML_DB", "azimuth")
     db = MlStorage(url, user, password, dbname)
+else:
+    raise ValueError(f"Invalid DB type: {db_type}")
 
 world = setup_world(db, world_id)
 if not world:

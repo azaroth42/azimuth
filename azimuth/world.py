@@ -1,13 +1,16 @@
-from werkzeug.security import generate_password_hash, check_password_hash
-from . import entities
-from azimuth.command_decorator import commands
+import asyncio
 import copy
-import time
-from rich import print
+import functools
 import importlib
 import logging
-import asyncio
-import functools
+import time
+
+from rich import print
+from werkzeug.security import check_password_hash, generate_password_hash
+
+from azimuth.command_decorator import commands
+
+from . import entities
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -134,7 +137,9 @@ class World:
 
     def get_object_by_name(self, name, clss=None):
         for what in self.active_objects.values():
-            if (clss is None or isinstance(what, clss)) and what.match_object(name, None):
+            if (clss is None or isinstance(what, clss)) and what.match_object(
+                name, None
+            ):
                 return what
         # Persistence layer might be able to search too
         data = self.db.get_object_by_name(name, clss)
@@ -197,7 +202,9 @@ class World:
 
         # Check if username is already registered using the Redis set
         if username in self.players:
-            return f"Username '{username}' is already taken, please try another username."
+            return (
+                f"Username '{username}' is already taken, please try another username."
+            )
 
         if username in ["id", "class"]:
             return f"Username '{username}' is invalid, please try again."
@@ -242,13 +249,15 @@ class World:
             return "Already logged in?!"
 
         # Check if user is registered in players
-        player_id = self.players[username]
+        player_id = self.players.get(username)
         if not player_id:
             return "Username and password do not match."
 
         player = self.load(player_id)
         if not isinstance(player, entities.Player):
-            return f"Username is not associated with a player object: {player.__class__}"
+            return (
+                f"Username is not associated with a player object: {player.__class__}"
+            )
 
         # Check if password matches
         if not check_password_hash(player.password_hash, password):
@@ -338,8 +347,10 @@ class World:
             ]
 
             for s in search_order:
+                print(f"Command search on {s}")
                 cmds = s.get_commands(w1)
                 for c in cmds.get(w1, []):
+                    print(f"Found: {c}")
                     if len(words) == 1 and not any([c["dobj"], c["prep"], c["iobj"]]):
                         c["func"](s, player, prep=None, verb=w1)
                         return
@@ -365,7 +376,12 @@ class World:
                                 else:
                                     if s == player:
                                         # allow any * any
-                                        if c["dobj"] == "any" and d and c["iobj"] == "any" and i:
+                                        if (
+                                            c["dobj"] == "any"
+                                            and d
+                                            and c["iobj"] == "any"
+                                            and i
+                                        ):
                                             c["func"](s, player, d, i, prep=p, verb=w1)
                                             return
                                     if c["dobj"] == "self":
@@ -387,7 +403,10 @@ class World:
                     else:
                         # no prep, so no iobj
                         # and also not none ... so must be dobj
-                        if c["dobj"] == "self" and s.match_object(argstr, player, verb=w1):
+                        print(s.match_object(argstr, player, verb=w1))
+                        if c["dobj"] == "self" and s.match_object(
+                            argstr, player, verb=w1
+                        ):
                             c["func"](s, player, prep=None, verb=w1)
                             return
                         elif c["dobj"] == "any":
@@ -407,7 +426,7 @@ class World:
 
 # --- Game World Creation / Initialization ---
 def setup_world(db, world_id):
-    """Checks if the world exists in Redis and creates it if not."""
+    """Checks if the world exists and creates it if not."""
 
     world = World(db, world_id)
     world.register_commands()
@@ -421,7 +440,15 @@ def setup_world(db, world_id):
         # constructor is (id, world, data, recursive)
         # main data fields: name, description, location, contents
 
-        from .entities import Place, Object, Exit, Container, Programmer, HeldObject, Clothing
+        from .entities import (
+            Clothing,
+            Container,
+            Exit,
+            HeldObject,
+            Object,
+            Place,
+            Programmer,
+        )
 
         # Places - Keep track of IDs for linking
         start_room = Place(

@@ -1,13 +1,15 @@
+import os
+
+import dotenv
+import socketio
+import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi_mcp import FastApiMCP
-import socketio
-from .persistence import SimpleFileStorage, MlStorage
+
+from .persistence import MlStorage, SimpleFileStorage
 from .world import setup_world
-import dotenv
-import os
-import uvicorn
 
 dotenv.load_dotenv()
 
@@ -88,12 +90,16 @@ async def disconnect(sid):
 @sio.event
 async def command(sid, data):
     """Handles commands received from a player."""
-    command_text = data.get("command") if isinstance(data, dict) else data  # Allow plain string command
+    command_text = (
+        data.get("command") if isinstance(data, dict) else data
+    )  # Allow plain string command
     if not command_text or not isinstance(command_text, str):
         return
 
     command_text = command_text.strip()
-    player_id = world.active_sids.get(sid, None)  # Get player ID from active session map
+    player_id = world.active_sids.get(
+        sid, None
+    )  # Get player ID from active session map
 
     # --- Handle pre-login commands: login, register ---
     if not player_id:
@@ -106,7 +112,9 @@ async def command(sid, data):
         if command_verb == "login" and len(args) == 2:
             msg = world.handle_login(sid, {"username": args[0], "password": args[1]})
         elif command_verb == "register" and len(args) == 3:
-            msg = world.handle_register(sid, {"username": args[0], "password": args[1], "email": args[2]})
+            msg = world.handle_register(
+                sid, {"username": args[0], "password": args[1], "email": args[2]}
+            )
         elif command_verb in ["login", "register"]:
             msg = f"Usage: {command_verb} <username> <password> [email]"
         else:
@@ -122,8 +130,8 @@ def on_shutdown():
     world.dump_database()
 
 
-mcp = FastApiMCP(app, name="Azimuth MCP Server", describe_all_responses=True, describe_full_response_schema=True)
-mcp.mount()
+# mcp = FastApiMCP(app, name="Azimuth MCP Server", describe_all_responses=True, describe_full_response_schema=True)
+# mcp.mount()
 
 # --- Main Execution ---
 if __name__ == "__main__":

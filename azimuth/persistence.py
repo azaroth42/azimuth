@@ -24,7 +24,7 @@ class DictStorage(Storage):
         self.data = {}
 
     def load(self, what_id):
-        return self.get(what_id, None)
+        return self.data.get(what_id, None)
 
     def save(self, what):
         self.data[what["id"]] = what

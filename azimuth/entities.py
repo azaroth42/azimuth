@@ -589,8 +589,10 @@ class Clothing(Object, Containable, Wearable):
         """If wearing the clothing, then show its contents."""
         desc = super().look_at(who)
         # Now call the mixins independently
-        d2 = Wearable.look_at(self, who)
-        return "\n".join([desc, d2])
+        d2 = Wearable.contained_look_at(self, who)
+        if d2:
+            desc += f"\n{d2}"
+        return desc
 
     def contained_look_at(self, who):
         return Wearable.contained_look_at(self, who)
@@ -610,10 +612,10 @@ class Player(BaseThing):
     """Represents a player connected and logged into the MUD."""
 
     connection = None
+    home: Place | None = None
 
     def __init__(self, id, world, data, recursive=True):
         self.connection = None
-        self.home = None
         super().__init__(id, world, data, recursive)
         self.username = data["username"]
         self.password_hash = data["password_hash"]
@@ -737,7 +739,7 @@ class Player(BaseThing):
             self.tell(f"Your new description: {self.description}")
 
     @make_command("@home")
-    def home(self, player, target=None, prep=None, verb=None):
+    def go_home(self, player, target=None, prep=None, verb=None):
         if not self.home:
             player.tell("You don't have a home.")
         elif self.home == self.location:

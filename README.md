@@ -33,6 +33,7 @@ to set up on a new machine. Start there before making non-trivial changes.
 | Persistence | [azimuth/persistence.py](azimuth/persistence.py) | JSON-file or MarkLogic backends |
 | AI agents | [azimuth/agents/](azimuth/agents/) | LLM room builder (in-process) |
 | Text client | [client.py](client.py) | Socket.IO + prompt_toolkit terminal client |
+| TUI client | [tui_client.py](tui_client.py) | Textual terminal client (status bar, live room panel, completion) |
 | Web client | [azimuth/templates/index.html](azimuth/templates/index.html) | Browser terminal at `/` |
 
 **Server.** FastAPI wrapped in a `socketio.ASGIApp`, served with uvicorn. It exposes
@@ -89,10 +90,20 @@ python3 -m venv .venv
 Then connect with either client:
 
 ```bash
-.venv/bin/python client.py     # text client
+.venv/bin/python client.py      # plain text client
+.venv/bin/python tui_client.py  # TUI client (richer UI)
 ```
 
 or open <http://localhost:5001/> for the browser terminal.
+
+The TUI client takes an optional server URL argument
+(`.venv/bin/python tui_client.py http://mud.example:5001`) or the
+`AZIMUTH_SERVER_URL` environment variable. It shows a live status bar
+(connection phase, server URL, player name), a side panel tracking the
+current room / exits / things / inventory (parsed from `look` output), and
+lightly styled output. In-client commands (``/help /clear /connect
+/disconnect /server <url> /log [path] /quit``) and the keys Up/Down
+(history), Tab (completion), F1 (help), Ctrl+Q (quit) work offline.
 
 **Moving machines?** `db/` (world state), `.env`, and `.venv` are all gitignored —
 copy `db/` and `.env` out of band, and recreate the venv on the new box. If `db/`
@@ -173,8 +184,8 @@ the in-process API and will not run. See *Known issues* below.
 - `run-agent.py` references methods that no longer exist on `RoomBuilderAgent`
   (`connect_to_mud`, `login`, `send_command`, …) and imports from the wrong path.
 - `run-repl.py` builds the agent but never invokes it (no `__main__` block).
-- `prompt_toolkit` (needed by the text client) and the spaCy/bagpipes deps for the
-  parser experiment are missing from `requirements.txt`.
+- The spaCy/bagpipes deps for the parser experiment are missing from
+  `requirements.txt` (`prompt_toolkit` and `textual` for the clients are present).
 - `MlStorage` bakes its own web API path (`http://localhost:5001/data/`) into the
   MarkLogic document URIs.
 - See [ARCHITECTURE.md §8](ARCHITECTURE.md) for the rest (stub commands, the

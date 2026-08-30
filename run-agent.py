@@ -14,8 +14,8 @@ import os
 # Add the current directory to the Python path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from agents.room_builder import RoomBuilderAgent
-from agents.config import AgentConfig
+from azimuth.agents.room_builder import RoomBuilderAgent
+from azimuth.agents.config import AgentConfig
 
 # Configure logging for examples
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -94,7 +94,7 @@ async def test_connections():
     # Test MUD connection
     try:
         config = AgentConfig()
-        agent = RoomBuilderAgent(config)
+        agent = RoomBuilderAgent(config=config)
 
         print(f"Testing MUD connection to {config.mud_server_url}...")
         mud_connected = await agent.connect_to_mud()

@@ -353,8 +353,7 @@ class World:
                 # generic ancestor handler (e.g. Exit.use, Openable.open) runs
                 # before the specialized override (OpenableExit.use's closed
                 # check, Lockable.open's lock check) -- a locked door would
-                # open, and a closed door would be walkable. See
-                # ARCHITECTURE.md §7.
+                # open, and a closed door would be walkable.
                 for c in reversed(cmds.get(w1, [])):
                     if len(words) == 1 and not any([c["dobj"], c["prep"], c["iobj"]]):
                         c["func"](s, player, prep=None, verb=w1)

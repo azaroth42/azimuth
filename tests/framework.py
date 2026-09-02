@@ -26,6 +26,7 @@ Suite runner: python run-tests.py [name filter]
 import contextlib
 import importlib
 import io
+import json
 import os
 import pkgutil
 import shutil
@@ -39,7 +40,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from azimuth.persistence import SimpleFileStorage
+from azimuth.persistence import SimpleFileStorage, SqliteStorage
 from azimuth.world import setup_world
 
 WORLD_ID = os.getenv("AZIMUTH_WORLD_ID", "WORLD1")
@@ -125,18 +126,42 @@ class Session:
 
 
 class TestWorld:
-    """A fresh world backed by a throwaway copy of the database."""
+    """A fresh world backed by a throwaway copy of the database.
 
-    def __init__(self):
+    `db_type` selects the storage backend ("file" (default) or "sqlite");
+    both seed from the real db/ when it exists, so tests exercise the same
+    world regardless of backend.
+    """
+
+    def __init__(self, db_type=None):
+        self.db_type = db_type or "file"
         self.dir = tempfile.mkdtemp(prefix="azimuth_test_")
         db_dir = os.path.join(self.dir, "db")
-        if os.path.isdir(REAL_DB):
-            # Seed from the real world so tests see the same rooms/objects/
-            # players the user's running world has.
-            shutil.copytree(REAL_DB, db_dir, dirs_exist_ok=True)
+        if self.db_type == "sqlite":
+            self.storage = SqliteStorage(os.path.join(self.dir, "azimuth.db"))
+            if os.path.isdir(REAL_DB):
+                # Seed from the real (file-based) world so tests see the
+                # same rooms/objects/players the user's world has.
+                for fn in sorted(os.listdir(REAL_DB)):
+                    if not fn.endswith(".json"):
+                        continue
+                    with open(os.path.join(REAL_DB, fn)) as fh:
+                        doc = json.load(fh)
+                    if "id" not in doc:
+                        # The players file is a username->id map without an
+                        # id of its own (older worlds); the file backend
+                        # addresses it by filename, so inject that -- exactly
+                        # what persist_players/World.__init__ expect.
+                        doc["id"] = fn[: -len(".json")]
+                    self.storage.save(doc)
         else:
-            os.makedirs(db_dir, exist_ok=True)
-        self.storage = SimpleFileStorage(db_dir)
+            if os.path.isdir(REAL_DB):
+                # Seed from the real world so tests see the same
+                # rooms/objects/players the user's running world has.
+                shutil.copytree(REAL_DB, db_dir, dirs_exist_ok=True)
+            else:
+                os.makedirs(db_dir, exist_ok=True)
+            self.storage = SimpleFileStorage(db_dir)
         self.world = setup_world(self.storage, WORLD_ID)
         # The real server injects an async socketio server; in tests we use
         # the fake, whose methods are sync, so bypass the async plumbing.
@@ -161,6 +186,8 @@ class TestWorld:
         return s
 
     def clean(self):
+        if hasattr(self.storage, "close"):
+            self.storage.close()
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
@@ -234,12 +261,19 @@ class AzimuthTest:
         return obj
 
 
-def run_tests(pattern=None, keep_db=False):
-    """Discover and run every AzimuthTest in the tests package."""
+def run_tests(pattern=None, keep_db=False, db_type=None):
+    """Discover and run every AzimuthTest in the tests package.
+
+    `db_type` ("file" default, or "sqlite") selects the storage backend
+    every TestWorld uses, so the whole suite can be verified against each
+    backend: `python run-tests.py --db sqlite`.
+    """
     import tests
 
     failures = []
     total = 0
+    if db_type:
+        print(f"storage backend: {db_type}")
     for mod_info in pkgutil.iter_modules(tests.__path__):
         if mod_info.name == "framework":
             continue
@@ -258,9 +292,10 @@ def run_tests(pattern=None, keep_db=False):
                 if pattern and pattern.lower() not in label.lower():
                     continue
                 total += 1
-                tw = TestWorld()
+                tw = TestWorld(db_type=db_type)
                 buf = io.StringIO()
                 t0 = time.time()
+                tb = None
                 try:
                     with contextlib.redirect_stdout(buf):
                         getattr(cls(tw), mname)()
@@ -268,13 +303,16 @@ def run_tests(pattern=None, keep_db=False):
                 except Exception:
                     status = "FAIL"
                     failures.append(label)
+                    # Capture inside the except: sys.exc_info() is cleared
+                    # once the block exits, so this must happen here.
+                    tb = traceback.format_exc()
                 finally:
                     if not keep_db:
                         tw.clean()
                 dt = time.time() - t0
                 print(f"[{status}] {label} ({dt:.2f}s)")
                 if status == "FAIL":
-                    print(traceback.format_exc())
+                    print(tb)
                     out = buf.getvalue()
                     if out:
                         print("---- game output ----")

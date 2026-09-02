@@ -4,7 +4,7 @@ import dotenv
 
 from azimuth.agents.config import AgentConfig
 from azimuth.agents.room_builder import RoomBuilderAgent
-from azimuth.persistence import MlStorage, SimpleFileStorage
+from azimuth.persistence import MlStorage, SimpleFileStorage, SqliteStorage
 from azimuth.world import setup_world
 
 dotenv.load_dotenv()
@@ -13,6 +13,9 @@ db_type = os.getenv("AZIMUTH_DB_TYPE", "file")
 
 if db_type == "file":
     db = SimpleFileStorage()
+elif db_type == "sqlite":
+    path = os.getenv("AZIMUTH_SQLITE_PATH", os.path.join("db", "azimuth.db"))
+    db = SqliteStorage(path)
 elif db_type == "marklogic":
     url = os.getenv("AZIMUTH_ML_URL", "http://localhost:8000")
     user = os.getenv("AZIMUTH_ML_USER", "admin")

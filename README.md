@@ -19,8 +19,8 @@ The design goals that fell out of that:
   currently disabled (see below).
 
 **Deep-dive:** [ARCHITECTURE.md](ARCHITECTURE.md) documents the subsystems, the
-current state, the known bugs (one is fully diagnosed and ready to fix), and how
-to set up on a new machine. Start there before making non-trivial changes.
+current state, the known bugs, and how to set up on a new machine. Start there
+before making non-trivial changes.
 
 ## Architecture
 
@@ -30,7 +30,7 @@ to set up on a new machine. Start there before making non-trivial changes.
 | World engine | [azimuth/world.py](azimuth/world.py) | Object cache, lazy loading, login, command dispatch |
 | Command system | [azimuth/command_decorator.py](azimuth/command_decorator.py) | `@make_command` registration and resolution |
 | Object model | [azimuth/entities.py](azimuth/entities.py), [azimuth/mixins.py](azimuth/mixins.py) | `Place`/`Exit`/`Object`/`Player` + capability mixins |
-| Persistence | [azimuth/persistence.py](azimuth/persistence.py) | JSON-file or MarkLogic backends |
+| Persistence | [azimuth/persistence.py](azimuth/persistence.py) | file, SQLite, or MarkLogic backends |
 | AI agents | [azimuth/agents/](azimuth/agents/) | LLM room builder (in-process) |
 | Text client | [client.py](client.py) | Socket.IO + prompt_toolkit terminal client |
 | TUI client | [tui_client.py](tui_client.py) | Textual terminal client (status bar, live room panel, completion) |
@@ -74,16 +74,25 @@ announcements) → `Exit` (movement, lazy destination) → `Object` (take/drop/u
 
 - `file` (default) — one JSON file per object in `db/` (gitignored; world state is
   local). Name search shells out to `grep`.
+- `sqlite` — one row per object in a single database file (`db/azimuth.db`,
+  override with `AZIMUTH_SQLITE_PATH`), using stdlib `sqlite3` — no extra
+  dependency. Name/class lookups are indexed SQL queries instead of `grep`.
 - `marklogic` — documents in a MarkLogic database via its REST API (CTQ queries).
 
-All active objects are dumped back to storage on server shutdown and on disconnect.
+All active objects are dumped back to storage on server shutdown and on
+disconnect.
+
+An existing file world can be ported to SQLite with
+[run-migrate-sqlite.py](run-migrate-sqlite.py) (it upserts by id and never
+deletes the JSON files — re-run it any time after playing on the file backend;
+switching the server over is just `AZIMUTH_DB_TYPE=sqlite` in `.env`).
 
 ## Running
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt prompt_toolkit
-.venv/bin/python run-tests.py      # verify: 14/14 passed
+.venv/bin/python run-tests.py      # verify: 28/28 passed
 .venv/bin/python run.py            # server on 0.0.0.0:5001 (uvicorn, --reload)
 ```
 
@@ -118,7 +127,8 @@ world is created; an existing `db/` will use whatever was registered there.)
 | Variable | Default | Purpose |
 |---|---|---|
 | `AZIMUTH_WORLD_ID` | `WORLD1` | World name/id |
-| `AZIMUTH_DB_TYPE` | `file` | `file` or `marklogic` |
+| `AZIMUTH_DB_TYPE` | `file` | `file`, `sqlite`, or `marklogic` |
+| `AZIMUTH_SQLITE_PATH` | `db/azimuth.db` | SQLite database file |
 | `AZIMUTH_ML_URL` | `http://localhost:8000` | MarkLogic REST endpoint |
 | `AZIMUTH_ML_USER` | `admin` | MarkLogic user |
 | `AZIMUTH_ML_PASSWORD` | — | MarkLogic password |
@@ -196,12 +206,13 @@ the in-process API and will not run. See *Known issues* below.
 - ~~Use uvicorn or other non-sucky server framework~~ — done (uvicorn + FastAPI)
 - ~~`handle_login` KeyError on unknown usernames~~ — done (`.get()`)
 - ~~`get_commands` double-merging inherited `default_commands`~~ — done (`__dict__` guard + tests)
-- ~~Verb-shadowing dispatch bug~~ — done (`reversed(...)` dispatch + `LockableExit.__init__` chain + `lock` command; [ARCHITECTURE.md §7](ARCHITECTURE.md))
+- ~~Verb-shadowing dispatch bug~~ — done (`reversed(...)` dispatch + `LockableExit.__init__` chain + `lock` command)
+- ~~SQLite persistence backend~~ — done (`AZIMUTH_DB_TYPE=sqlite`; `run-migrate-sqlite.py` ports an existing file world)
 - Finish the stub commands (whisper, positioning, `Positionable.look_at`, levers)
 - Wire the spaCy parser in for robust command interpretation
 - Re-enable the MCP mount; add write actions (create/modify objects)
 - Clean up the agent scripts (`run-agent.py`, `run-repl.py`) around the in-process design
-- More robust persistence — Redis, Postgres, or other real databases
+- More robust persistence — Redis, Postgres, or other real databases (SQLite is in, but a server-class DB would be the next step)
 - AI agents that play, not just build
 
 ## Testing
@@ -211,8 +222,9 @@ A serverless in-process test harness runs commands directly against a `World`
 `db/` in a temp dir, so tests never touch your real world:
 
 ```bash
-python run-tests.py              # run all tests
+python run-tests.py              # run all tests (file backend)
 python run-tests.py sword        # only tests whose name contains "sword"
+python run-tests.py --db sqlite  # run the whole suite on the sqlite backend
 python run-tests.py --keep-db    # keep the temp test databases for inspection
 ```
 

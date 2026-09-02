@@ -1,6 +1,6 @@
 """Regression tests for dispatch order on exits with state.
 
-The verb-shadowing bug (ARCHITECTURE.md §7): `get_commands` merges class
+The verb-shadowing bug: `get_commands` merges class
 commands shallowest-ancestor-first, and the dispatcher used to try entries
 in list order (first match wins) -- so the *generic* ancestor handler ran
 before the *specialized* one. On a door that meant `open` ran the lock-unaware

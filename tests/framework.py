@@ -101,12 +101,27 @@ class Session:
             if event == "message" and to == self.sid
         ]
 
+    def states(self):
+        """All out-of-band `state` payloads sent to this connection.
+
+        Only non-empty when the session announced OOB capability (see
+        TestWorld.oob), which mirrors the client's `data` hello.
+        """
+        return [
+            data
+            for (event, data, to) in self.tw.fake.emitted
+            if event == "state" and to == self.sid
+        ]
+
     def send(self, command):
         """Run a command as this player; return the messages it produced."""
         if self.player is None:
             raise RuntimeError(f"session {self.sid} is not logged in")
         start = len(self.messages())
         self.tw.world.process_player_command(self.player.id, command)
+        # Mirror the server's `command` handler (azimuth/main.py): coalesce
+        # any state changes into the out-of-band `state` channel.
+        self.tw.world.flush_state()
         return self.messages()[start:]
 
     # --- convenience queries ---
@@ -185,6 +200,12 @@ class TestWorld:
         self.sessions.append(s)
         return s
 
+    def oob(self, session: Session) -> Session:
+        """Mark a session's connection as OOB-capable (mirrors the client's
+        `data` hello), so it receives structured `state` events."""
+        self.world.oob_sids.add(session.sid)
+        return session
+
     def clean(self):
         if hasattr(self.storage, "close"):
             self.storage.close()
@@ -213,6 +234,7 @@ class AzimuthTest:
                 )
                 if start is not None and self.session.player.location is not start:
                     self.session.player.move_to(start)
+                self.tw.world.flush_state()
         return self.session
 
     def assert_msg(self, msgs, *want, absent=()):

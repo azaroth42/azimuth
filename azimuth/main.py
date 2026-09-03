@@ -1,4 +1,5 @@
 import os
+import time
 
 import dotenv
 import socketio
@@ -88,6 +89,9 @@ async def connect(sid, environ):
 async def disconnect(sid):
     """Handles a player disconnection"""
     print(f"Client disconnected: {sid}")
+    world.oob_sids.discard(sid)
+    world._state_seq.pop(sid, None)
+    world._last_resync.pop(sid, None)
     world.on_disconnect(sid)
 
 
@@ -127,6 +131,28 @@ async def command(sid, data):
     else:
         # Process command synchronously for now
         world.process_player_command(player_id, command_text)
+        # Coalesce any state changes the command made into one `state` event
+        # per affected OOB client (OOB-PROTOCOL.md).
+        world.flush_state()
+
+
+@sio.event
+async def data(sid, body):
+    """Client out-of-band operations (OOB-PROTOCOL.md §4.2)."""
+    if not isinstance(body, dict):
+        return
+    op = body.get("op")
+    if op == "hello" and body.get("v") == 1:
+        # Tag this client as OOB-capable: it will now receive `state` events.
+        world.oob_sids.add(sid)
+    elif op == "resync":
+        now = time.monotonic()
+        if now - world._last_resync.get(sid, 0) < 1.0:
+            return  # rate-limit: ignore rapid repeats
+        world._last_resync[sid] = now
+        pid = world.active_sids.get(sid)
+        if pid is not None and pid in world.active_objects:
+            world.push_init(world.active_objects[pid])
 
 
 @app.on_event("shutdown")

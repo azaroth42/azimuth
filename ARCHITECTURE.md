@@ -22,9 +22,10 @@ as a "vibe coding" experiment and grown into a working engine with an AI layer:
 
 ### State as of writing
 
-- Tests: **28/28 passing** on the file backend (`python run-tests.py`) and on
+- Tests: **39/39 passing** on the file backend (`python run-tests.py`) and on
   sqlite (`python run-tests.py --db sqlite`): 20 game-logic + 8 storage-contract
-  tests (the contract tests run against *both* backends in-process).
+  + 11 out-of-band state-channel tests (the contract tests run against *both*
+  backends in-process).
 - The working tree may have uncommitted changes (user + agent edits interleave);
   run `git status` first. Do not revert changes you did not make.
 - `db/` (world state) and `.env` are **gitignored** — they do not survive a git
@@ -49,6 +50,7 @@ as a "vibe coding" experiment and grown into a working engine with an AI layer:
 | `run-tests.py` + `tests/` | Serverless test framework + suite (see §6.4) |
 | `run-migrate-sqlite.py` | One-way port of a file world (`db/*.json`) into the SQLite backend |
 | `experiments/spacy_parser.py` | Unwired NLP parser experiment (spaCy + bagpipes_spacy) |
+| `OOB-PROTOCOL.md` | **Implemented** design (v1) of the out-of-band `state`/`data` socket channel — live who/inventory/room state + per-object verb summaries feeding the TUI's completion/dropdowns (`tests/test_oob.py` pins it) |
 | `db/` | World state (gitignored): one JSON file per object on the file backend, or `azimuth.db` on sqlite |
 | `requirements.txt` | Server deps; note the `mcp<2` pin (see §6.1) |
 
@@ -63,7 +65,7 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt prompt_toolkit   # prompt_toolkit: needed by client.py, not yet in requirements
 
 # 3. Verify
-.venv/bin/python run-tests.py      # expect 28/28 passed (add --db sqlite for the sqlite backend)
+.venv/bin/python run-tests.py      # expect 39/39 passed (add --db sqlite for the sqlite backend)
 
 # 4. Run
 .venv/bin/python run.py            # server on 0.0.0.0:5001
@@ -86,6 +88,11 @@ FastAPI wrapped in `socketio.ASGIApp`, served by uvicorn:
 1. **Socket.IO** — `connect` (MOTD + login prompt), `command` (→
    `world.process_player_command`), `disconnect` (persists `last_location`).
    Commands are processed synchronously inside the async handler ("for now").
+   Plus the **out-of-band state channel** (`OOB-PROTOCOL.md`): clients announce
+   capability with a `data` `hello`; the server pushes structured
+   `state` events (room/inventory/players sections + verb summaries) —
+   dirty-marked in the world, coalesced, and flushed at the end of each
+   `command` handler. Old clients that never hello get none of it.
 2. **Web client** — `GET /` serves the browser terminal (Jinja2).
 3. **REST** — `GET /data/{id}` and `GET /search/{name}` (world inspection).
 4. **MCP — currently disabled**: the `FastApiMCP(...)` + `mcp.mount()` lines are

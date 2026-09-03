@@ -5,11 +5,14 @@ A full-featured terminal client for the Azimuth MUD server, built with
 Textual.  Compared to the plain prompt_toolkit client it adds:
 
 * a live status bar (connection phase, server URL, player name)
-* a side panel tracking the current room, exits, visible things and your
-  inventory (parsed from the server's ``look`` / ``inventory`` output)
+* a side panel tracking the current room, exits, visible things, your
+  inventory and the connected players -- driven by the server's structured
+  out-of-band ``state`` channel (OOB-PROTOCOL.md) when available, falling
+  back to parsing the ``look`` / ``inventory`` / ``@who`` text otherwise
 * lightly styled output (room headers, exits, items, says, errors)
-* command history (Up/Down) and Tab completion (verbs, in-world objects,
-  players)
+* command history (Up/Down) and model-driven Tab completion (verbs from
+  the server, in-world objects, players)
+* an F5 verb menu: the verbs the server will accept on a given object
 * offline client commands:  /help /clear /connect /disconnect
   /server <url> /log [path] /quit
 
@@ -19,13 +22,15 @@ Usage::
     python tui_client.py http://mud.example:5001
     AZIMUTH_SERVER_URL=http://mud.example:5001 python tui_client.py
 
-Keys:  Up/Down history, Tab complete, F1 help, Ctrl+Q quit, Ctrl+X force quit.
+Keys:  Up/Down history, Tab complete, F5 verb menu, F1 help,
+       Ctrl+Q quit, Ctrl+X force quit.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import queue
 import re
@@ -39,7 +44,13 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Footer, Input, Label, RichLog
+from textual.screen import ModalScreen
+from textual.widgets import Footer, Input, Label, OptionList, RichLog
+
+try:
+    from textual.widgets import Option  # newer Textual re-exports it
+except ImportError:  # pragma: no cover - textual 8.x keeps it in the private module
+    from textual.widgets._option_list import Option  # type: ignore[assignment]
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -59,7 +70,9 @@ CMD_CONNECT = "\x02connect"
 CMD_DISCONNECT = "\x02disconnect"
 CMD_QUIT = "\x02quit"
 
-# Verbs offered by Tab completion (mirrors the command set in the README).
+# Fallback verbs for Tab completion (mirrors the command set in the README).
+# With the out-of-band channel active, the server's own verb table (the
+# `self` section of the state channel) replaces this list.
 VERBS = (
     "l", "look", "inv", "inventory", "i",
     "say", "emote", "whisper", "wh",
@@ -166,6 +179,15 @@ class SocketSession:
     def stop(self) -> None:
         self._stop.set()
 
+    def request_resync(self) -> None:
+        """Ask the server for a fresh full state snapshot (suspected desync)."""
+        client = self._client
+        if client is not None and client.connected:
+            try:
+                client.emit("data", {"op": "resync"})
+            except Exception:
+                pass
+
     # -- internals ---------------------------------------------------------
 
     def _publish(self, ev: ServerEvent) -> None:
@@ -222,6 +244,12 @@ class SocketSession:
         def connect() -> None:  # noqa: F811
             session._user_initiated = False
             session._publish(ServerEvent("status", "connected"))
+            # Announce out-of-band capability (OOB-PROTOCOL.md §4.2).  The
+            # server tags this sid and will now push structured `state`.
+            try:
+                client.emit("data", {"op": "hello", "v": 1})
+            except Exception:
+                pass
 
         @client.event
         def connect_error(data) -> None:  # noqa: F811
@@ -249,6 +277,12 @@ class SocketSession:
             if isinstance(data, dict):
                 data = data.get("message") or data.get("text") or str(data)
             session._publish(ServerEvent("message", str(data)))
+
+        @client.event
+        def state(data=None) -> None:  # noqa: F811
+            # Structured out-of-band world state (dict: v/kind/seq/sections).
+            # (default: tolerate a zero-arg event, cf. the message handler)
+            session._publish(ServerEvent("state", data))
 
         @client.event
         def disconnect_request() -> None:  # noqa: F811
@@ -328,6 +362,137 @@ class SocketSession:
 
 
 # ---------------------------------------------------------------------------
+# World model (the client's structured view, fed by the state channel)
+# ---------------------------------------------------------------------------
+
+
+class WorldModel:
+    """The client's structured view of the world (OOB-PROTOCOL.md §7.2).
+
+    Maintained from ``state`` events: an ``init`` snapshot replaces all
+    sections, an ``update`` replaces only the sections it carries.
+    """
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.self_: dict | None = None
+        self.room: dict | None = None
+        self.inventory: list[dict] = []
+        self.players: list[dict] = []
+        self._things: dict[str, dict] = {}
+
+    def apply(self, payload: dict) -> None:
+        if not isinstance(payload, dict):
+            return
+        if "self" in payload:
+            self.self_ = payload["self"]
+        if "room" in payload:
+            self.room = payload["room"]
+        if "inventory" in payload:
+            self.inventory = payload["inventory"]
+        if "players" in payload:
+            self.players = payload["players"]
+        self._reindex()
+
+    def _reindex(self) -> None:
+        self._things = {}
+
+        def add(t: object) -> None:
+            if isinstance(t, dict) and t.get("id"):
+                self._things[t["id"]] = t
+                for c in t.get("contents") or []:
+                    add(c)
+
+        if self.room:
+            for t in (self.room.get("things") or []) + (self.room.get("exits") or []):
+                add(t)
+        for t in self.inventory:
+            add(t)
+
+    # -- completion pools --------------------------------------------------
+
+    def verb_pool(self) -> list[str]:
+        """All verb aliases the server offers on the player (self section)."""
+        if not self.self_ or not self.self_.get("verbs"):
+            return []
+        pool: list[str] = []
+        for entry in self.self_["verbs"]:
+            for v in entry.get("verb") or []:
+                if v not in pool:
+                    pool.append(v)
+        return pool
+
+    def object_pool(self) -> list[str]:
+        """Everything referenceable: room things, exits, carried things,
+        contents of open things, plus 'me'/'here' -- names and aliases."""
+        pool: list[str] = []
+
+        def add(t: object) -> None:
+            if not isinstance(t, dict):
+                return
+            names = [t.get("name")] + list(t.get("aliases") or [])
+            for n in names:
+                if n and n not in pool:
+                    pool.append(n)
+            for c in t.get("contents") or []:
+                add(c)
+
+        if self.room:
+            for t in (self.room.get("things") or []) + (self.room.get("exits") or []):
+                add(t)
+        for t in self.inventory:
+            add(t)
+        for n in ("me", "here"):
+            if n not in pool:
+                pool.append(n)
+        return pool
+
+    def player_pool(self) -> list[str]:
+        pool: list[str] = []
+        for p in self.players:
+            n = p.get("name")
+            if n and n not in pool:
+                pool.append(n)
+        if self.room:
+            for t in self.room.get("things") or []:
+                if t.get("cls") == "Player":
+                    n = t.get("name")
+                    if n and n not in pool:
+                        pool.append(n)
+        if "me" not in pool:
+            pool.append("me")
+        return pool
+
+    def thing_by_name(self, prefix: str) -> dict | None:
+        """Model twin of BaseThing.match_object: full, alias, last word,
+        or unique prefix (case-insensitive).  'me'/'here' are special."""
+        prefix = (prefix or "").lower().strip("\"' ")
+        if not prefix:
+            return None
+        if prefix in ("me", "myself"):
+            return self.self_
+        if prefix == "here":
+            return self.room
+        exact: list[dict] = []
+        pref: list[dict] = []
+        for t in self._things.values():
+            name = (t.get("name") or "").lower()
+            names = [name] + [a.lower() for a in (t.get("aliases") or [])]
+            if " " in name:
+                names.append(name.split()[-1])
+            names = [n for n in names if n]
+            if prefix in names:
+                exact.append(t)
+            elif any(n.startswith(prefix) for n in names):
+                pref.append(t)
+        if exact:
+            return exact[0]
+        return pref[0] if len(pref) == 1 else None
+
+
+# ---------------------------------------------------------------------------
 # Widgets
 # ---------------------------------------------------------------------------
 
@@ -356,6 +521,56 @@ class CommandInput(Input):
         await super()._on_key(event)
 
 
+class VerbMenu(ModalScreen[str | None]):
+    """F5 dropdown: the verbs the server will accept on a chosen object.
+
+    Each row shows the command it would form; uncertain argument slots are
+    rendered as placeholders.  Enter dismisses with the insert-text, Esc
+    with None.
+    """
+
+    CSS = """
+    VerbMenu {
+        align: center middle;
+    }
+    #vm-box {
+        width: 56;
+        height: auto;
+        max-height: 80%;
+        background: #0e1219;
+        border: round #3d6dd8;
+        padding: 1 2;
+    }
+    #vm-title { color: #b6b6b6; text-style: bold; margin-bottom: 1; }
+    OptionList { height: 1fr; }
+    """
+
+    def __init__(self, title: str, rows: list[tuple[str, str]]):
+        super().__init__()
+        self._title = title
+        self._rows = rows
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="vm-box"):
+            yield Label(f"verbs for {self._title}", id="vm-title")
+            yield OptionList(
+                *[Option(label, id=str(i)) for i, (label, _) in enumerate(self._rows)]
+            )
+
+    def on_mount(self) -> None:
+        # Children are not attached yet in on_mount; focus once composed.
+        self.call_after_refresh(self._focus_list)
+
+    def _focus_list(self) -> None:
+        if self.is_mounted:
+            self.query_one(OptionList).focus()
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        idx = event.option_index
+        if 0 <= idx < len(self._rows):
+            self.dismiss(self._rows[idx][1])
+
+
 # ---------------------------------------------------------------------------
 # The app
 # ---------------------------------------------------------------------------
@@ -369,8 +584,9 @@ PHASE_STYLE = {
 HELP_LINES: list[tuple[str, str]] = [
     ("── AZIMUTH CLIENT ─────────────────────────", "bold bright_blue"),
     ("", "default"),
-    ("Keys:   Up/Down history · Tab complete · F1 help", "default"),
+    ("Keys:   Up/Down history · Tab complete · F5 verb menu · F1 help", "default"),
     ("        Ctrl+Q quit (notifies server) · Ctrl+X force quit", "default"),
+    ("        F5: verbs the server accepts on the object under the cursor", "dim"),
     ("", "default"),
     ("Local commands (no server needed):", "bold"),
     ("  /connect   /disconnect   /server <url>   /clear   /log [path]   /quit", "cyan"),
@@ -435,6 +651,7 @@ class AzimuthClient(App):
 
     BINDINGS = [
         Binding("f1", "help", "Help", show=False),
+        Binding("f5", "verbs", "Verb menu", show=False),
         Binding("ctrl+q", "graceful_quit", "Quit", priority=True),
         Binding("ctrl+x", "hard_quit", "Force quit"),
     ]
@@ -445,11 +662,17 @@ class AzimuthClient(App):
         self._phase: str | None = None
         self._previous_phase: str | None = None
         self._player_name: str | None = None
+        # Text-parsed fallback world data (used only when the out-of-band
+        # channel is unavailable -- old server).
         self._room: str | None = None
         self._exits: list[str] = []
         self._room_items: list[str] = []
         self._carry: list[str] = []
         self._players: list[str] = []
+        # Out-of-band state channel (OOB-PROTOCOL.md §7).
+        self.model = WorldModel()
+        self._oob = False            # True once the first `state` arrives
+        self._text_harvest = True    # flipped off when OOB takes over
         self._history: list[str] = []
         self._hist_idx: int | None = None
         self._hist_saved: str | None = None
@@ -457,6 +680,7 @@ class AzimuthClient(App):
         self._completion_idx = 0
         self._log_lines: list[str] = []
         self._pump_task: asyncio.Task | None = None
+        self._tick: object | None = None
         self._cmd: CommandInput | None = None
         self._output: RichLog | None = None
         self._side: Vertical | None = None
@@ -479,6 +703,8 @@ class AzimuthClient(App):
                 yield Label("—", id="room-items", classes="panel-body")
                 yield Label("CARRYING", classes="panel-head")
                 yield Label("—", id="carry-list", classes="panel-body")
+                yield Label("PLAYERS", classes="panel-head")
+                yield Label("—", id="players-list", classes="panel-body")
             with Vertical(id="output-pane"):
                 yield RichLog(
                     id="output",
@@ -504,6 +730,8 @@ class AzimuthClient(App):
         self._banner()
         self.session.start()
         self._pump_task = asyncio.get_running_loop().create_task(self._pump())
+        # Refresh the live @who relative ages once a second.
+        self._tick = self.set_interval(1.0, self._tick_players)
 
     def _on_resize(self, *args) -> None:
         # Hide the side panel on narrow terminals.
@@ -514,6 +742,13 @@ class AzimuthClient(App):
         self.session.stop()
         if self._pump_task is not None:
             self._pump_task.cancel()
+        if self._tick is not None:
+            # Timer.stop() in textual 8.x; RepeatTimer.cancel() in newer.
+            stop = getattr(self._tick, "cancel", None) or getattr(
+                self._tick, "stop", None
+            )
+            if stop is not None:
+                stop()  # type: ignore[operator]
 
     # -- bridge pump -------------------------------------------------------
 
@@ -532,8 +767,38 @@ class AzimuthClient(App):
     def _dispatch(self, ev: ServerEvent) -> None:
         if ev.kind == "status":
             self._set_phase(ev.data, ev.detail)
+        elif ev.kind == "state":
+            self._on_state(ev.data)
         else:
             self._append_message(ev.data)
+
+    def _on_state(self, data) -> None:
+        """Apply an out-of-band state payload (OOB-PROTOCOL.md §4.1)."""
+        payload = data
+        if isinstance(payload, (str, bytes)):
+            try:
+                payload = json.loads(payload)
+            except (ValueError, TypeError):
+                return
+        if not isinstance(payload, dict) or payload.get("v") != 1:
+            return
+        kind = payload.get("kind")
+        self.model.apply(payload)
+        # From here on the channel is the source of truth for the panel and
+        # completion; the text-parsing fallback stands down.
+        self._oob = True
+        self._text_harvest = False
+        if payload.get("self"):
+            self._player_name = payload["self"].get("name")
+            self._render_player()
+        self._refresh_panel()
+        if kind == "init":
+            self._write_line(
+                Text(
+                    "  (world model synchronised -- Tab completion and the F5 verb menu are live)",
+                    "dim",
+                )
+            )
 
     def _set_phase(self, phase: str, detail: str) -> None:  # noqa: D102
         # (kept small and separate so callers read clearly)
@@ -551,6 +816,17 @@ class AzimuthClient(App):
             ))
         elif phase == "disconnected":
             self._write_line(Text(f"── disconnected ──{(' ' + detail) if detail else ''}", "red"))
+            # Forget the structured world; a reconnect re-logins and a fresh
+            # `state` init (or the text fallback) will rebuild it.
+            self._oob = False
+            self._text_harvest = True
+            self.model.reset()
+            self._room = None
+            self._exits = []
+            self._room_items = []
+            self._carry = []
+            self._players = []
+            self._refresh_panel()
         elif phase == "connecting" and self._previous_phase == "disconnected":
             self._write_line(
                 Text("── reconnecting… ──" + (f" ({detail})" if detail else ""), "yellow")
@@ -607,10 +883,15 @@ class AzimuthClient(App):
         self._refresh_panel()
 
     def _style_line(self, line: str) -> Text:
+        # The world-data assignments below are the text-parsing fallback:
+        # they run only while the out-of-band channel is not in service.
+        harvest = self._text_harvest
+
         m = ROOM_RE.match(line)
         if m:
             name = m.group(1)
-            self._room = name
+            if harvest:
+                self._room = name
             width = max(10, self._output.size.width - 2) if self._output else 60
             if width <= len(name) + 4:
                 return Text(f"--- {name} ---", "bold bright_cyan")
@@ -620,7 +901,8 @@ class AzimuthClient(App):
         m = SEEH_RE.match(line)
         if m:
             names = split_list(m.group(1))
-            self._room_items = names
+            if harvest:
+                self._room_items = names
             t = Text("You see here: ", "green")
             for i, n in enumerate(names):
                 if i:
@@ -630,13 +912,15 @@ class AzimuthClient(App):
             return t
 
         if line.strip() == "The place looks empty.":
-            self._room_items = []
+            if harvest:
+                self._room_items = []
             return Text("The place looks empty.", "italic dim")
 
         m = EXITS_RE.match(line)
         if m:
             names = split_list(m.group(1))
-            self._exits = names
+            if harvest:
+                self._exits = names
             t = Text("Exits: ", "magenta")
             for i, n in enumerate(names):
                 if i:
@@ -648,7 +932,8 @@ class AzimuthClient(App):
         m = CARRY_RE.match(line)
         if m:
             names = split_list(m.group(1))
-            self._carry = names
+            if harvest:
+                self._carry = names
             t = Text("You are carrying: ", "yellow")
             for i, n in enumerate(names):
                 if i:
@@ -658,13 +943,15 @@ class AzimuthClient(App):
             return t
 
         if line.strip() == "You are not carrying anything":
-            self._carry = []
+            if harvest:
+                self._carry = []
             return Text(line, "dim")
 
         m = WELCOME_RE.match(line)
         if m:
-            self._player_name = m.group(1)
-            self._render_player()
+            if harvest:
+                self._player_name = m.group(1)
+                self._render_player()
             return Text(line, "bold bright_green")
 
         if line.strip() == "Registration successful!":
@@ -683,7 +970,8 @@ class AzimuthClient(App):
 
         # "@who" rows: first column is a player name — harvest it for completion.
         if WHO_RE.match(line) and " seconds ago" in line:
-            self._players.append(line.split()[0])
+            if harvest:
+                self._players.append(line.split()[0])
             return Text(line)
 
         if ERROR_RE.search(line):
@@ -699,16 +987,57 @@ class AzimuthClient(App):
     def _refresh_panel(self) -> None:
         if self._output is None:
             return
+        if self._oob:
+            room = self.model.room or {}
+            room_name = room.get("name") or ""
+            exits = [e.get("name") or "" for e in room.get("exits", [])]
+            items = [t.get("name") or "" for t in room.get("things", [])]
+            carry = [t.get("name") or "" for t in self.model.inventory]
+        else:
+            room_name = self._room or ""
+            exits = self._exits
+            items = self._room_items
+            carry = self._carry
 
         def fmt(names: list[str]) -> str:
             return _wrap(" · ".join(names)) if names else "—"
 
         self.query_one("#room-name", Label).update(
-            Text(_wrap(self._room or ""), "bold cyan") if self._room else Text("—", "240")
+            Text(_wrap(room_name), "bold cyan") if room_name else Text("—", "240")
         )
-        self.query_one("#exit-list", Label).update(Text(fmt(self._exits), "magenta"))
-        self.query_one("#room-items", Label).update(Text(fmt(self._room_items), "green"))
-        self.query_one("#carry-list", Label).update(Text(fmt(self._carry), "yellow"))
+        self.query_one("#exit-list", Label).update(Text(fmt(exits), "magenta"))
+        self.query_one("#room-items", Label).update(Text(fmt(items), "green"))
+        self.query_one("#carry-list", Label).update(Text(fmt(carry), "yellow"))
+        self._refresh_players_panel()
+
+    def _refresh_players_panel(self) -> None:
+        """Live @who panel.  Ages are rendered locally from `seen`, so no
+        re-push is needed as time passes."""
+        if self._oob and self.model.players:
+            now = time.time()
+            lines = []
+            for p in self.model.players:
+                age = max(0, int(now - p.get("seen", now)))
+                if age >= 3600:
+                    t = f"{age // 3600}h{age % 3600 // 60}m ago"
+                elif age >= 60:
+                    t = f"{age // 60}m{age % 60}s ago"
+                else:
+                    t = f"{age}s ago"
+                suffix = " (you)" if p.get("self") else ""
+                loc = f" — {p['loc']}" if p.get("loc") else ""
+                lines.append(f"{p.get('name', '?')}{loc} · {t}{suffix}")
+            body = "\n".join(
+                "\n".join(textwrap.wrap(l, PANEL_WIDTH)) for l in lines
+            )
+        else:
+            names = self._players
+            body = _wrap(" · ".join(names)) if names else "—"
+        self.query_one("#players-list", Label).update(Text(body))
+
+    def _tick_players(self) -> None:
+        if self._oob:
+            self._refresh_players_panel()
 
     # -- input -------------------------------------------------------------
 
@@ -782,7 +1111,8 @@ class AzimuthClient(App):
         Completing the first word runs against the verb list; completing
         anywhere in the arguments runs against in-world objects (or players
         for whisper), matching the *whole* argument prefix so multi-word
-        names like ``a short sword`` work.
+        names like ``a short sword`` work.  Pools come from the world model
+        when the out-of-band channel is active, else from text parsing.
         """
         if self._cmd is None:
             return False
@@ -804,7 +1134,8 @@ class AzimuthClient(App):
             word = text[:pos].strip("\"'")
             if not word:
                 return False
-            pool = list(VERBS)
+            pool = self.model.verb_pool() if self._oob else []
+            pool = pool or list(VERBS)
             repl, repl_len = self._pick(word, pool)
             if repl is None:
                 return False
@@ -820,12 +1151,18 @@ class AzimuthClient(App):
         prefix = typed.strip(" \t\"'")
         words = text.split()
         first = words[0] if words else ""
-        if first in ("whisper", "wh"):
-            pool = self._player_pool()
-        elif first in OBJECT_VERBS:
-            pool = self._object_pool()
+        if self._oob:
+            if first in ("whisper", "wh"):
+                pool = self.model.player_pool()
+            else:
+                pool = self.model.object_pool() or self.model.verb_pool()
         else:
-            pool = self._object_pool() or list(VERBS)
+            if first in ("whisper", "wh"):
+                pool = self._player_pool()
+            elif first in OBJECT_VERBS:
+                pool = self._object_pool()
+            else:
+                pool = self._object_pool() or list(VERBS)
 
         repl, repl_len = self._pick(prefix, pool)
         if repl is None:
@@ -883,6 +1220,123 @@ class AzimuthClient(App):
         if target.startswith(word):
             return word + target[suffix_len:], suffix_len
         return target, len(target)
+
+    # -- verb menu (F5) ----------------------------------------------------
+
+    @staticmethod
+    def _primary_verb(verbs: list[str]) -> str:
+        return max(verbs, key=len) if verbs else ""
+
+    def _verb_rows(self, thing: dict) -> list[tuple[str, str]]:
+        """Build the dropdown rows (label, insert_text) for a thing.
+
+        Certain argument slots are filled from the model; uncertain slots
+        carry a NUL sentinel so the cursor can be placed in the gap.
+        """
+        rows: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for e in thing.get("verbs") or []:
+            verb = self._primary_verb(e.get("verb") or [])
+            if not verb:
+                continue
+            dobj = e.get("dobj")
+            preps = e.get("prep") or []
+            iobj = e.get("iobj")
+            lab: list[str] = [verb]
+            ins: list[str] = [verb]
+            if dobj:
+                d, v = self._verb_slot(dobj, e, thing)
+                lab.append(d)
+                ins.append(v)
+            if preps and iobj is not None:
+                lab.append(preps[0])
+                ins.append(preps[0])
+                d, v = self._verb_slot(iobj, e, thing)
+                lab.append(d)
+                ins.append(v)
+            label = " ".join(t for t in lab if t)
+            text = " ".join(ins)
+            if label in seen:
+                continue
+            seen.add(label)
+            rows.append((label, text))
+        rows.sort(key=lambda r: ("\x00" in r[1], r[0]))
+        return rows
+
+    def _verb_slot(self, role: str, entry: dict, thing: dict) -> tuple[str, str]:
+        """(display, insert) for one argument slot of a verb entry."""
+        if role == "self":
+            name = thing.get("name") or "self"
+            return name, name
+        if role == "any":
+            return "<text>", "\x00"
+        if role == "Player":
+            pool = self.model.player_pool()
+        else:
+            pool = self._verb_object_pool(entry, thing)
+        if len(pool) == 1:
+            return pool[0], pool[0]
+        return f"<{role.lower()}>", "\x00"
+
+    def _verb_object_pool(self, entry: dict, thing: dict) -> list[str]:
+        """Pool for an Object slot.  ``take <x> from <self>`` completes
+        against the selected thing's contents; otherwise against the
+        room+inventory pool."""
+        preps = entry.get("prep") or []
+        if entry.get("iobj") == "self" and preps and all(p == "from" for p in preps):
+            pool: list[str] = []
+            for c in thing.get("contents") or []:
+                for n in [c.get("name")] + list(c.get("aliases") or []):
+                    if n and n not in pool:
+                        pool.append(n)
+            if pool:
+                return pool
+        return self.model.object_pool()
+
+    def action_verbs(self) -> None:
+        """F5: open the verb menu for the object the cursor points at."""
+        if self._cmd is None:
+            return
+        words = self._cmd.value.split()
+        if not words:
+            self._write_local(
+                "F5: type part of a thing first (e.g. 'use '), then press F5",
+                "yellow",
+            )
+            return
+        if not self._oob:
+            self._write_local(
+                "verb menu needs the out-of-band channel -- not available from this server",
+                "yellow",
+            )
+            return
+        candidate = words[-1].strip("\"'")
+        thing = self.model.thing_by_name(candidate)
+        if thing is None:
+            self._write_local(f"F5: no such thing: {candidate}", "yellow")
+            return
+        rows = self._verb_rows(thing)
+        if not rows:
+            self._write_local(f"F5: {thing.get('name', '?')} offers no verbs", "yellow")
+            return
+        self.push_screen(
+            VerbMenu(thing.get("name") or "?", rows), callback=self._on_verb_choice
+        )
+
+    def _on_verb_choice(self, text: str | None) -> None:
+        """A verb-menu row was chosen: put the command in the input buffer,
+        cursor on the first unfilled slot."""
+        if text is None or self._cmd is None:
+            return
+        if "\x00" in text:
+            pos = text.index("\x00")
+            value = text.replace("\x00", "")
+            self._cmd.value = value[:pos] + value[pos + 1:]
+            self._cmd.cursor_position = pos
+        else:
+            self._cmd.value = text
+            self._cmd.cursor_position = len(text)
+        self._cmd.focus()
 
     # -- client commands ---------------------------------------------------
 

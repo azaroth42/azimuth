@@ -23,6 +23,7 @@ class StateToggle:
             player.location.announce_all_but(
                 self.get_message(f"toggle_{which}_on_others", player), player
             )
+            self.world.mark_thing_changed(self)
             return True
         return False
 
@@ -37,6 +38,7 @@ class StateToggle:
             player.location.announce_all_but(
                 self.get_message(f"toggle_{which}_off_others", player), player
             )
+            self.world.mark_thing_changed(self)
             return True
         return False
 
@@ -70,6 +72,9 @@ class Openable(StateToggle):
             lpo = world.get_object(lpo)
         self.open_paired_object = lpo
 
+    def state_summary(self):
+        return ["open" if getattr(self, "is_open", True) else "closed"]
+
     @make_command("open", "self")
     def open(self, player, prep=None, verb=None):
         ok = self.toggle_on("open", player)
@@ -82,6 +87,7 @@ class Openable(StateToggle):
         ok = self.toggle_off("open", player)
         if ok and self.open_paired_object is not None:
             self.open_paired_object.is_open = False
+            self.world.mark_thing_changed(self.open_paired_object)
 
     def look_at(self, who):
         if self.is_open:
@@ -129,6 +135,9 @@ class Lockable(Openable):
         if lpo is not None:
             lpo = world.get_object(lpo)
         self.lock_paired_object = lpo
+
+    def state_summary(self):
+        return ["locked" if self.is_locked else "unlocked"]
 
     @make_command("open", "self")
     def open(self, player, prep=None, verb=None):
@@ -271,6 +280,9 @@ class Switchable(StateToggle):
     def __init__(self, id, world, data, recursive=False):
         super().__init__(id, world, data, recursive)
         self.is_on = data.get("is_on", False)
+
+    def state_summary(self):
+        return ["on" if self.is_on else "off"]
 
 
 # table, bike/horse, chair, platform etc.

@@ -12,6 +12,7 @@ from azimuth.mixins import (
     Lockable,
     Openable,
     Positionable,
+    Switchable,
     Wearable,
 )
 
@@ -87,10 +88,13 @@ class BaseThing:
         if self.location is not None:
             self.location.contents.remove(self)
             self.location.on_leave(self)
+        old = self.location
         self.location = where
         if self.location is not None:
             self.location.contents.append(self)
             where.on_enter(self)
+        # Out-of-band: let the world mark state sections dirty for observers.
+        self.world.mark_moved(self, old, where)
 
     def enter_ok(self, what):
         # Can what be moved to self?
@@ -203,6 +207,92 @@ class BaseThing:
         else:
             c = cmds.get(match, [])
             return {match: c}
+
+    # --- Out-of-band state channel (see OOB-PROTOCOL.md) ---
+
+    def state_summary(self):
+        """Short state strings for the client (open/closed, locked/unlocked,
+        on/off).  Mixins are consulted directly (unbound calls) because the
+        diamond MROs would otherwise let BaseThing shadow them.
+        Returns None when the thing has no state."""
+        states = []
+        for mixin in (Openable, Lockable, Switchable):
+            if isinstance(self, mixin):
+                s = mixin.state_summary(self)
+                if s:
+                    states.extend(s)
+        return states or None
+
+    def verbs_summary(self, who, include_argless=False):
+        """This thing's merged command table as JSON-safe entries, restricted
+        to what *who* may do right now -- the same okay_for_verb gate the
+        dispatcher applies, so the summary never advertises a verb dispatch
+        would reject.  `func` refs are dropped; duplicate shapes collapse to
+        one entry.
+
+        With include_argless=False (things), only entries that carry a
+        'self' slot are listed: argless entries on a *remote* thing can't be
+        aimed at it (a bare verb always resolves to the speaker first), and
+        'dobj any'-style entries (say/emote) run on the speaker regardless.
+        """
+        if who is None:
+            return []
+        seen = set()
+        out = []
+        for entries in self.get_commands().values():
+            for info in entries:
+                if not any(self.okay_for_verb(v, who) for v in info["verb"]):
+                    continue
+                key = (
+                    tuple(info["verb"]),
+                    info["dobj"],
+                    tuple(info["prep"]) if info["prep"] else None,
+                    info["iobj"],
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                targetable = info["dobj"] == "self" or info["iobj"] == "self"
+                if not targetable and not include_argless:
+                    continue
+                out.append(
+                    {
+                        "verb": list(info["verb"]),
+                        "dobj": info["dobj"],
+                        "prep": list(info["prep"]) if info["prep"] else None,
+                        "iobj": info["iobj"],
+                    }
+                )
+        return out
+
+    def _contents_summary(self, who):
+        """What *who* may see inside this thing -- mirrors in-band `look`:
+        open (or not openable) containers list their contents; players and
+        worn clothing only reveal held/worn items."""
+        if who is None or not who.can_see(self):
+            return None
+        if isinstance(self, (Player, Clothing)):
+            items = [x for x in self.contents if x.contained_look_at(who)]
+        elif hasattr(self, "is_open") and not self.is_open:
+            return None
+        else:
+            items = list(self.contents)
+        return [x.thing_summary(who) for x in items] or None
+
+    def thing_summary(self, who):
+        """Compact, visibility-safe description of this thing for *who*."""
+        s = {
+            "id": self.id,
+            "name": self.name,
+            "aliases": list(self.aliases or []),
+            "cls": self.__class__.__name__,
+            "state": self.state_summary(),
+            "verbs": self.verbs_summary(who),
+        }
+        c = self._contents_summary(who)
+        if c is not None:
+            s["contents"] = c
+        return s
 
     # for custom commands
     def register_command(self, info):
@@ -839,6 +929,9 @@ class Programmer(Player):
                         place.add_exit(exit2)
                     else:
                         player.tell(f"Could not make exit from {bits[1]}")
+            self.world.mark_room_dirty(self.location)
+            if place is not None:
+                self.world.mark_room_dirty(place)
             player.tell(f"You dig {exits} to {room} ({place}).")
 
     @make_command("@chparent", "any", "to", "any")
@@ -859,6 +952,7 @@ class Programmer(Player):
                 del self.world.active_objects[wid]
                 del target
                 target = self.world.load(wid)
+                self.world.mark_thing_changed(target)
                 player.tell(f"You change the parent of {what} to {new_class}.")
             else:
                 player.tell(f"Could not find class {new_class}")
@@ -873,6 +967,7 @@ class Programmer(Player):
             # directly change the class
             what.name = new_name
             what._save()
+            self.world.mark_thing_changed(what)
             player.tell(f"You rename {what} to {new_name}.")
 
     @make_command("@create", "any", "as", "any")

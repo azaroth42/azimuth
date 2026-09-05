@@ -3,6 +3,7 @@ import copy
 import functools
 import importlib
 import logging
+import re
 import time
 
 from rich import print
@@ -212,12 +213,19 @@ class World:
     # ------------------------------------------------------------------
 
     def state_self(self, p):
-        return {
+        s = {
             "id": p.id,
             "name": p.name,
             "username": p.username,
             "verbs": p.verbs_summary(p, include_argless=True),
         }
+        pos = p.find_position()
+        if pos is not None:
+            parent, ppos, verb = pos
+            s["position"] = (
+                f"{parent.posture_ing(verb)} " if verb else ""
+            ) + f"{ppos} the {parent.name}"
+        return s
 
     def state_room(self, p):
         loc = p.location
@@ -293,6 +301,12 @@ class World:
             self.mark_room_dirty(loc)
         elif isinstance(loc, entities.Player):
             self.mark_inventory_dirty(loc)
+            # A thing's held/worn state also shows in the holder's summary,
+            # which other players see as part of the room; mark the room too
+            # so they refresh (superset is fine -- the flush diff is exact).
+            room = loc.location
+            if isinstance(room, entities.Place):
+                self.mark_room_dirty(room)
 
     # --- emission ---
 
@@ -526,48 +540,50 @@ class World:
                         continue
                     elif c["prep"] is not None:
                         for p in c["prep"]:
-                            if p in argstr:
-                                # Ensure put gong on long bong splits sanely
-                                bits = argstr.split(f" {p} ")
-                                if len(bits) == 2:
-                                    (d, i) = bits
-                                else:
-                                    print(bits)
-                                    player.tell(f"yuck: {bits}")
-                                    return
-                                d = d.strip()
-                                i = i.strip()
-                                if (not c["dobj"] and d) or (c["dobj"] and not d):
-                                    continue
-                                elif (not c["iobj"] and i) or (c["iobj"] and not i):
-                                    continue
-                                else:
-                                    if s == player:
-                                        # allow any * any
-                                        if (
-                                            c["dobj"] == "any"
-                                            and d
-                                            and c["iobj"] == "any"
-                                            and i
-                                        ):
-                                            c["func"](s, player, d, i, prep=p, verb=w1)
+                            # Split on the preposition as a whole word, so
+                            # 'put gong on long bong' splits sanely AND a
+                            # preposition that leads the arguments
+                            # ('look at wizard' -> 'at wizard') is handled.
+                            bits = re.split(
+                                r"(?:^|\s+)" + re.escape(p) + r"(?:\s+|$)",
+                                argstr,
+                            )
+                            if len(bits) != 2:
+                                continue
+                            (d, i) = bits
+                            d = d.strip()
+                            i = i.strip()
+                            if (not c["dobj"] and d) or (c["dobj"] and not d):
+                                continue
+                            elif (not c["iobj"] and i) or (c["iobj"] and not i):
+                                continue
+                            else:
+                                if s == player:
+                                    # allow any * any
+                                    if (
+                                        c["dobj"] == "any"
+                                        and d
+                                        and c["iobj"] == "any"
+                                        and i
+                                    ):
+                                        c["func"](s, player, d, i, prep=p, verb=w1)
+                                        return
+                                if c["dobj"] == "self":
+                                    if not s.match_object(d, player):
+                                        continue
+                                    else:
+                                        c["func"](s, player, i, prep=p, verb=w1)
+                                        return
+                                if c["iobj"] == "self":
+                                    if not s.match_object(i, player):
+                                        continue
+                                    else:
+                                        if not d:
+                                            c["func"](s, player, prep=p, verb=w1)
                                             return
-                                    if c["dobj"] == "self":
-                                        if not s.match_object(d, player):
-                                            continue
                                         else:
-                                            c["func"](s, player, i, prep=p, verb=w1)
+                                            c["func"](s, player, d, prep=p, verb=w1)
                                             return
-                                    if c["iobj"] == "self":
-                                        if not s.match_object(i, player):
-                                            continue
-                                        else:
-                                            if not d:
-                                                c["func"](s, player, prep=p, verb=w1)
-                                                return
-                                            else:
-                                                c["func"](s, player, d, prep=p, verb=w1)
-                                                return
                     else:
                         # no prep, so no iobj
                         # and also not none ... so must be dobj
@@ -608,13 +624,14 @@ def setup_world(db, world_id):
         # main data fields: name, description, location, contents
 
         from .entities import (
-            Clothing,
             Container,
+            EdibleThing,
             Exit,
             HeldObject,
             Object,
             Place,
             Programmer,
+            WearableObject,
         )
 
         # Places - Keep track of IDs for linking
@@ -668,7 +685,7 @@ def setup_world(db, world_id):
                 "location": start_room.id,
             },
         )
-        armor = Clothing(
+        armor = WearableObject(
             None,
             world,
             {
@@ -687,7 +704,7 @@ def setup_world(db, world_id):
                 "location": hallway.id,
             },
         )
-        bread = Object(
+        bread = EdibleThing(
             None,
             world,
             {

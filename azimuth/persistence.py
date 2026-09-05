@@ -1,10 +1,8 @@
 import os
 import json
 import glob
-import shlex
 import sqlite3
 import requests
-import subprocess
 
 
 class Storage:
@@ -118,31 +116,33 @@ class SimpleFileStorage(Storage):
             return None
 
     def get_object_by_name(self, name, clss=None):
-        # Use system `grep` to search files for name. grep exits 1 on no
-        # match, so run() (not check_output) -- a search for a name that
-        # doesn't exist must return None, not raise.
-        cmd = f"grep -i {shlex.quote(name)} {self.directory}/*"
-        output = subprocess.run(cmd, shell=True, capture_output=True).stdout.decode("utf-8")
-        files = output.split("\n")
-        files = [f.split(":")[0] for f in files if f]
+        # Field-accurate name search, mirroring SqliteStorage: a
+        # case-insensitive exact match on name or on any alias.  The old
+        # implementation grepped whole files, which also matched
+        # descriptions, ids and even class names -- e.g. "switch" hit a
+        # SwitchableObject named "lamp" -- and returned the wrong object.
+        ql = name.lower()
+        files = []
+        for fid in self.iter_ids():
+            doc = self._read_file(fid + self.suffix) or {}
+            if str(doc.get("name", "")).lower() == ql:
+                files.append(fid)
+            elif any(str(a).lower() == ql for a in doc.get("aliases", [])):
+                files.append(fid)
+        if clss is not None:
+            # Disambiguate by class (mirrors the other backends); the
+            # players file and other class-less docs must not break this.
+            files = [
+                fid
+                for fid in files
+                if (self._read_file(fid + self.suffix) or {}).get("class")
+                == clss.__name__
+            ]
         if len(files) == 1:
-            return self.load(self._file_to_id(files[0]))
-        elif len(files) > 1:
-            if clss is not None:
-                # Disambiguate by class (mirrors the other backends); the
-                # players file and other class-less docs must not break this.
-                files = [
-                    f
-                    for f in files
-                    if (self._read_file(f) or {}).get("class") == clss.__name__
-                ]
-                if len(files) == 1:
-                    return self.load(self._file_to_id(files[0]))
-                return None
+            return self.load(files[0])
+        elif files:
             print(f"Multiple files found for name '{name}'")
-            return None
-        else:
-            return None
+        return None
 
     def get_all_objects(self, clss=None):
         objs = []

@@ -186,7 +186,7 @@ carried, wielded, worn).
 | `name` | primary name |
 | `aliases` | alias list (empty if none) — lets the client complete prefixes against *all* names |
 | `cls` | Python class name (`"HeldObject"`, `"Container"`, `"Player"`, …) — display + behavior hints |
-| `state` | `null` or a list of short state strings, e.g. `["closed"]`, `["locked","closed"]` — see `state_summary()` below |
+| `state` | `null` or a list of short state strings, e.g. `["closed"]`, `["locked","closed"]`, `["held"]`, `["worn"]` — see `state_summary()` below |
 | `verbs` | the object's **effective command table for this player** (§5.3) |
 | `contents` | *optional*: list of thing-summaries of what is inside — present only when the player may see in (§6.2). Enables `get <gem> from <chest>` completion |
 
@@ -238,7 +238,8 @@ def thing_summary(self, who):
     }
 
 def state_summary(self):
-    """None by default; Openable/Lockable/Switchable contribute short strings."""
+    """None by default; Openable/Lockable/Switchable/Holdable/Wearable
+    contribute short strings (incl. "held"/"worn")."""
     return None
 
 def verbs_summary(self, who, include_argless=False):
@@ -272,8 +273,12 @@ Notes:
   `OOBTest.test_verb_summary_gating`.)
 - `StateToggle` gets `state_summary()` support: `Openable` contributes
   `"open"`/`"closed"`, `Lockable` adds `"locked"`/`"unlocked"`, `Switchable`
-  `"on"`/`"off"`. (Requires the known-safe `self.is_open` accessor discipline
-  already noted in ARCHITECTURE.md §8.)
+  `"on"`/`"off"`. The carry-state mixins are consulted too: `Holdable` adds
+  `"held"` (when `held_by` is set) and `Wearable` adds `"worn"` (when
+  `worn_by` is set) — this is what lets a client annotate a carried item with
+  `(held)` / `(worn)` (the TUI does so in its CARRYING panel). (Requires the
+  known-safe `self.is_open` accessor discipline already noted in
+  ARCHITECTURE.md §8.)
 
 ### 5.3 Example: the chest
 

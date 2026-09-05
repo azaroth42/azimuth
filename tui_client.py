@@ -104,6 +104,7 @@ ROOM_RE = re.compile(r"^---\s*(.+?)\s*---\s*$")
 SEEH_RE = re.compile(r"^You see here:\s*(.+?)\.?\s*$")
 EXITS_RE = re.compile(r"^Exits:\s*(.+?)\.?\s*$")
 CARRY_RE = re.compile(r"^You are carrying:\s*(.+?)\.?\s*$")
+HOLDWEAR_RE = re.compile(r"^You are (holding|wearing):\s*(.+?)\.?\s*$")
 WELCOME_RE = re.compile(r"^Welcome back,\s*(.+?)!$")
 SAY_YOU_RE = re.compile(r'^You say, "(.*)"$')
 SAY_OTHER_RE = re.compile(r'^(.+?) says, "(.*)"$')
@@ -942,6 +943,22 @@ class AzimuthClient(App):
             t.append_text(Text(_dot(line), "default"))
             return t
 
+        m = HOLDWEAR_RE.match(line)
+        if m:
+            label, raw = m.group(1), m.group(2)
+            names = split_list(raw)
+            if harvest:
+                for n in names:
+                    if n not in self._carry:
+                        self._carry.append(n)
+            t = Text(f"You are {label}: ", "yellow")
+            for i, n in enumerate(names):
+                if i:
+                    t.append_text(Text("  ", "default"))
+                t.append_text(Text(n, "bold yellow"))
+            t.append_text(Text(_dot(line), "default"))
+            return t
+
         if line.strip() == "You are not carrying anything":
             if harvest:
                 self._carry = []
@@ -984,6 +1001,17 @@ class AzimuthClient(App):
 
     # -- side panel --------------------------------------------------------
 
+    def _carry_label(self, thing: dict) -> str:
+        """A carried thing's name, annotated with (held)/(worn) when the
+        server's state says so, for the CARRYING panel."""
+        name = thing.get("name") or ""
+        state = thing.get("state") or []
+        if "worn" in state:
+            return f"{name} (worn)"
+        if "held" in state:
+            return f"{name} (held)"
+        return name
+
     def _refresh_panel(self) -> None:
         if self._output is None:
             return
@@ -992,7 +1020,7 @@ class AzimuthClient(App):
             room_name = room.get("name") or ""
             exits = [e.get("name") or "" for e in room.get("exits", [])]
             items = [t.get("name") or "" for t in room.get("things", [])]
-            carry = [t.get("name") or "" for t in self.model.inventory]
+            carry = [self._carry_label(t) for t in self.model.inventory]
         else:
             room_name = self._room or ""
             exits = self._exits

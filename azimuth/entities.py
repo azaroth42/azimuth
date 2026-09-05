@@ -60,8 +60,13 @@ class BaseThing:
         return f"<{self.__class__.__name__}: {self.name} ({self.id})>"
 
     def to_dict(self):
-        """Returns a dictionary representation of the base thing."""
-        return {
+        """Dictionary for persistence: the base fields merged with the fields
+        each state mixin contributes.  The mixins are consulted directly
+        (unbound calls, exactly as ``state_summary`` does) because the diamond
+        MROs would otherwise let BaseThing shadow their ``to_dict`` overrides
+        -- which silently dropped open/locked/held/worn/positioned state on
+        every save.  Each mixin's ``to_dict`` returns its own fields only."""
+        data = {
             "id": self.id,
             "class": self.__class__.__name__,
             "name": self.name,
@@ -71,6 +76,10 @@ class BaseThing:
             "contents": [x.id for x in self.contents],
             "messages": self._messages,
         }
+        for mixin in (Openable, Lockable, Switchable, Holdable, Wearable, Positionable):
+            if isinstance(self, mixin):
+                data.update(mixin.to_dict(self))
+        return data
 
     def _save(self):
         d = self.to_dict()
@@ -89,12 +98,40 @@ class BaseThing:
             self.location.contents.remove(self)
             self.location.on_leave(self)
         old = self.location
+        # Positioning is a same-room display relation: the moment this thing
+        # changes location (walks away, is picked up, is dropped elsewhere)
+        # its position relative to a Positionable is over.
+        if getattr(self, "_position_parent", None) is not None:
+            self._unposition()
         self.location = where
         if self.location is not None:
             self.location.contents.append(self)
             where.on_enter(self)
         # Out-of-band: let the world mark state sections dirty for observers.
         self.world.mark_moved(self, old, where)
+
+    # --- Positioning (display relation to a Positionable; see Positionable) ---
+
+    def find_position(self):
+        """(Positionable, position, verb) this thing currently occupies, or
+        None.  Derived from the back-reference the parent Positionable keeps
+        in its ``positioned`` lists -- that dict is the single source of
+        truth, so this costs no extra stored state."""
+        parent = getattr(self, "_position_parent", None)
+        if parent is None:
+            return None
+        for pos, entries in parent.positioned.items():
+            for t, verb in entries:
+                if t is self:
+                    return (parent, pos, verb)
+        return None
+
+    def _unposition(self):
+        """Drop this thing's position, if any (the parent also drops it from
+        its lists and re-marks the room dirty)."""
+        parent = getattr(self, "_position_parent", None)
+        if parent is not None:
+            parent.remove_positioned(self)
 
     def enter_ok(self, what):
         # Can what be moved to self?
@@ -134,7 +171,13 @@ class BaseThing:
                 names.append(namebits[-1])
 
         if type(name) is str:
-            name = name.lower()
+            name = name.lower().strip()
+            # Ignore a single leading article so "the table" / "a chair" match
+            # the same as "table" / "chair".
+            for _art in ("the ", "a ", "an "):
+                if name.startswith(_art):
+                    name = name[len(_art) :].strip()
+                    break
             if name in names:
                 return 1
             else:
@@ -212,11 +255,11 @@ class BaseThing:
 
     def state_summary(self):
         """Short state strings for the client (open/closed, locked/unlocked,
-        on/off).  Mixins are consulted directly (unbound calls) because the
-        diamond MROs would otherwise let BaseThing shadow them.
+        on/off, held/worn).  Mixins are consulted directly (unbound calls)
+        because the diamond MROs would otherwise let BaseThing shadow them.
         Returns None when the thing has no state."""
         states = []
-        for mixin in (Openable, Lockable, Switchable):
+        for mixin in (Openable, Lockable, Switchable, Holdable, Wearable):
             if isinstance(self, mixin):
                 s = mixin.state_summary(self)
                 if s:
@@ -271,7 +314,7 @@ class BaseThing:
         worn clothing only reveal held/worn items."""
         if who is None or not who.can_see(self):
             return None
-        if isinstance(self, (Player, Clothing)):
+        if isinstance(self, (Player, WearableObject)):
             items = [x for x in self.contents if x.contained_look_at(who)]
         elif hasattr(self, "is_open") and not self.is_open:
             return None
@@ -289,6 +332,12 @@ class BaseThing:
             "state": self.state_summary(),
             "verbs": self.verbs_summary(who),
         }
+        p = self.find_position()
+        if p is not None:
+            parent, pos, verb = p
+            s["position"] = (
+                f"{parent.posture_ing(verb)} " if verb else ""
+            ) + f"{pos} the {parent.name}"
         c = self._contents_summary(who)
         if c is not None:
             s["contents"] = c
@@ -367,16 +416,40 @@ class Place(BaseThing):
         desc.append(super().look_at(who))
         desc.append("")
 
-        # List visible contents (excluding the player looking)
-        visible_content_names = []
+        # Collect visible contents, splitting out anything positioned relative
+        # to a Positionable in this room -- those are described by position
+        # ("a plate on the table") rather than in the plain "you see here" list.
+        positioned = {}  # thing -> (parent, pos, verb); includes the looker
         for item in self.contents:
-            if item != who:  # Don't list the player themselves
-                if who.can_see(item):
-                    visible_content_names.append(item.name)
-        if visible_content_names:
-            desc.append(f"You see here: {', '.join(visible_content_names)}.\n")
-        else:
-            desc.append("The place looks empty.\n")
+            if isinstance(item, Positionable):
+                for pos, entries in item.positioned.items():
+                    for t, verb in entries:
+                        if who.can_see(t) and who.can_see(item):
+                            positioned[t] = (item, pos, verb)
+
+        plain_names = []
+        for item in self.contents:
+            if item == who or not who.can_see(item):
+                continue
+            if item in positioned:
+                continue
+            plain_names.append(item.name)
+        position_lines = []
+        for t, (parent, pos, verb) in positioned.items():
+            if t is who:
+                where = (
+                    f"{parent.posture_ing(verb)} {pos}" if verb else pos
+                ) + f" the {parent.name}"
+                position_lines.append(f"You are {where}.")
+            else:
+                position_lines.append(parent.position_line(t, pos, verb))
+
+        if plain_names:
+            desc.append(f"You see here: {', '.join(plain_names)}.")
+        elif not position_lines:
+            desc.append("The place looks empty.")
+        if position_lines:
+            desc.extend(position_lines)
 
         # List exits
         exit_names = []
@@ -653,22 +726,29 @@ class OpenableContainer(Container, Openable):
         Openable.__init__(self, id, world, data, recursive)
 
 
-class Furniture(Object, Positionable):
-    """Represents a furniture object relative to which players and objects can be positioned."""
+class PositionableObject(Object, Positionable):
+    """Represents a furniture (or similar) object relative to which players and objects can
+    be positioned (sit on a chair, lie under a table, put a plate on it...)."""
+
+    def __init__(self, id, world, data, recursive=False):
+        super().__init__(id, world, data, recursive)
+        # super() only chains Object -> BaseThing; Positionable's own __init__
+        # (self.positioned, ...) is never reached through the diamond, so call
+        # it explicitly -- same pattern as OpenableContainer / HeldObject.
+        Positionable.__init__(self, id, world, data, recursive)
 
     def look_at(self, who):
-        # Make contents visible if open
-        # super() will call on the object hierarchy
         desc = super().look_at(who)
-        # Now call the mixins independently
         d2 = Positionable.look_at(self, who)
-        return "\n".join([desc, d2])
+        if d2:
+            desc += f"\n{d2}"
+        return desc
 
     def take_ok(self, player):
         return False
 
 
-class Clothing(Object, Containable, Wearable):
+class WearableObject(Object, Containable, Wearable):
     """Represents a clothing object that can be worn, with pockets."""
 
     def __init__(self, id, world, data, recursive=False):
@@ -695,6 +775,95 @@ class HeldObject(Object, Holdable):
 
     def contained_look_at(self, who=None):
         return Holdable.contained_look_at(self, who)
+
+
+# --- Switchable Class ---
+class SwitchableObject(Object, Switchable):
+    """A lamp (or other light/electronic) that can be turned on and off."""
+
+    def __init__(self, id, world, data, recursive=False):
+        super().__init__(id, world, data, recursive)
+        # super() only chains Object -> BaseThing; call Switchable.__init__
+        # explicitly so is_on / on_paired_object are set (see PositionableObject).
+        Switchable.__init__(self, id, world, data, recursive)
+
+    def look_at(self, who):
+        desc = super().look_at(who)
+        d2 = Switchable.look_at(self, who)
+        if d2:
+            desc += f"\n{d2}"
+        return desc
+
+
+# --- Edible Class ---
+class EdibleThing(Object):
+    """An object that can be consumed -- food, drink, potion, etc.
+
+    ``eat``/``drink``/``quaff <this>`` consumes it: the base class announces
+    the consumption and then destroys the object.  Subclasses override
+    :meth:`_on_eaten` to apply the object's effect (heal, buff, poison, ...).
+    That hook runs while the object still exists -- immediately before it is
+    destroyed -- so it may rely on the object and its current location.
+
+    This is the seam that lets later potions and food carry effects, e.g.::
+
+        class HealingPotion(EdibleThing):
+            def _on_eaten(self, player):
+                player.tell("You feel your wounds close.")
+    """
+
+    default_messages = {
+        "eat": "You eat {self}.",
+        "eat_others": "{player} eats {self}.",
+        "eat_fail": "You can't eat {self}.",
+    }
+
+    def eat_ok(self, player):
+        """Whether *player* may consume this (default: always).
+
+        Reachability is already enforced by ``okay_for_verb``/``can_see`` --
+        you can only eat what you can see (carried, or in your room).  Override
+        this for finer rules ("must be held", "you're too full", ...).
+        """
+        return True
+
+    def _on_eaten(self, player):
+        """Hook: apply this object's effect when it is consumed.
+
+        Called from :meth:`eat` right before the object is destroyed, so the
+        object still exists and sits in its location.  The base implementation
+        is a no-op; override in subclasses to apply the effect.
+        """
+
+    @make_command(["eat", "drink", "quaff"], "self")
+    def eat(self, player, prep=None, verb=None):
+        if not player.can_see(self):
+            player.tell(self.get_message("fail_visible", player))
+        elif not self.eat_ok(player):
+            player.tell(self.get_message("eat_fail", player))
+        else:
+            player.tell(self.get_message("eat", player))
+            player.location.announce_all_but(
+                self.get_message("eat_others", player), player
+            )
+            self._on_eaten(player)  # effect while the object still exists
+            self.destroy()  # then consume it
+
+    def destroy(self):
+        """Remove this object from the world entirely.
+
+        Relocates anything it contains (so nothing is left orphaned), detaches
+        it from its current location (room or carrying player), drops it from
+        the in-memory world, and deletes it from the persistence layer.  The
+        detach marks the affected room / the carrier's inventory dirty for the
+        out-of-band state channel, so clients see it disappear.
+        """
+        parent = self.location
+        for c in list(self.contents):  # don't orphan nested things
+            c.move_to(parent)
+        self.move_to(None)  # leaves parent's contents; marks the OOB section dirty
+        self.world.active_objects.pop(self.id, None)
+        self.world.db.delete(self.id)
 
 
 # --- Player Class ---
@@ -735,12 +904,42 @@ class Player(BaseThing):
         return data
 
     def look_at(self, who=None):
+        """Description, plus anything *who* can see the player holding or
+        wearing (plain carried items stay hidden -- that's inventory, not
+        something on your person)."""
         desc = super().look_at(who)
+        held, worn = [], []
         for item in self.contents:
-            if xd := item.contained_look_at(who):
-                desc += f"\n{xd}"
-
+            mode = self._carry_mode(item)
+            if mode == "held":
+                held.append(item.name)
+            elif mode == "worn":
+                worn.append(item.name)
+        if held or worn:
+            subj = "You" if who is self else "They"
+            if held:
+                desc += f"\n{subj} are holding: {', '.join(held)}."
+            if worn:
+                desc += f"\n{subj} are wearing: {', '.join(worn)}."
+        p = self.find_position()
+        if p is not None:
+            parent, pos, verb = p
+            subj = "You" if who is self else "They"
+            where = (
+                f"{parent.posture_ing(verb)} {pos}" if verb else pos
+            ) + f" the {parent.name}"
+            desc += f"\n{subj} are {where}."
         return desc
+
+    def _carry_mode(self, item):
+        """How an item in this inventory is carried: 'held', 'worn', or plain
+        'carried'.  Derived from the item's state (Holdable/Wearable)."""
+        st = item.state_summary() or []
+        if "worn" in st:
+            return "worn"
+        if "held" in st:
+            return "held"
+        return "carried"
 
     def tell(self, message):
         if self.connection:
@@ -775,11 +974,29 @@ class Player(BaseThing):
     def inventory(self, player, prep=None, verb=None):
         if player != self:
             player.tell("You can't inventory someone else")
-        elif not self.contents:
+            return
+        # Group the inventory by how each item is carried: plain "carried"
+        # items, held (wielded) items, and worn items get their own sections.
+        carried, held, worn = [], [], []
+        for x in self.contents:
+            mode = self._carry_mode(x)
+            if mode == "held":
+                held.append(x.name)
+            elif mode == "worn":
+                worn.append(x.name)
+            else:
+                carried.append(x.name)
+        if not (carried or held or worn):
             player.tell("You are not carrying anything")
-        else:
-            stuff = ", ".join([x.name for x in self.contents])
-            player.tell(f"You are carrying: {stuff}")
+            return
+        parts = []
+        if carried:
+            parts.append(f"You are carrying: {', '.join(carried)}")
+        if held:
+            parts.append(f"You are holding: {', '.join(held)}")
+        if worn:
+            parts.append(f"You are wearing: {', '.join(worn)}")
+        player.tell("\n".join(parts))
 
     @make_command("say", "any")
     def say(self, argstr, prep=None, verb=None):
@@ -805,6 +1022,23 @@ class Player(BaseThing):
     @make_command(["wh", "whisper"], "any", "to", "Player")
     def whisper(self, argstr, target, prep=None, verb=None):
         pass
+
+    @make_command(["rise"])
+    def rise(self, player, prep=None, verb=None):
+        """Get up from whatever this player is positioned relative to.
+        ('rise' is single-word on purpose -- the parser keys on the first word,
+        so 'stand up' / 'get up' would never dispatch.)"""
+        if player != self:
+            player.tell("You can only raise yourself.")
+            return
+        p = self.find_position()
+        if p is None:
+            player.tell("You are already on your feet.")
+            return
+        parent, pos, verb = p
+        parent.remove_positioned(self)
+        player.tell("You rise to your feet.")
+        parent.location.announce_all_but(f"{self.name} rises to their feet.", self)
 
     @make_command("@who")
     def who(self, player, target=None, prep=None, verb=None):

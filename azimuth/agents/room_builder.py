@@ -17,7 +17,8 @@ import requests
 from typing import Any, Dict, Optional
 from .config import AgentConfig, SYSTEM_PROMPTS
 
-from ..entities import Place, Exit, OpenableExit, Object, Furniture, Clothing, HeldObject, Container
+from ..entities import (Place, Exit, OpenableExit, Object, PositionableObject,
+    WearableObject, HeldObject, Container)
 from ..world import World
 
 
@@ -50,9 +51,9 @@ class RoomBuilderAgent:
         self.object_class_hash = {
             "Container": Container,
             "HeldObject": HeldObject,
-            "Clothing": Clothing,
+            "WearableObject": WearableObject,
             "Food": None,
-            "Furniture": Furniture,
+            "PositionableObject": PositionableObject,
             "Item": Object,
         }
 

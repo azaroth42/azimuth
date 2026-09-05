@@ -78,7 +78,7 @@ class CommandRegistrationTest(AzimuthTest):
     """The MRO merge in get_commands must not double-register commands.
 
     Classes that declare no commands of their own (HeldObject, Container,
-    Clothing, Furniture, LockableExit) used to inherit a parent's
+    WearableObject, PositionableObject, LockableExit) used to inherit a parent's
     default_commands dict, so the walk merged the same entries twice.
     """
 

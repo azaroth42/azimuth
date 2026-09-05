@@ -17,6 +17,39 @@ from .classfactory import ClassFactory
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- out-of-band state cadence (see OOB-PROTOCOL.md 3.3, 8) ---------------
+# How long a section may go without being sent before the periodic pass
+# refreshes it.  Change-driven pushes ignore volatile fields (below), so this
+# is what keeps them from drifting -- and it is the repair path for a client
+# that missed an update.
+STATE_RESYNC_SECONDS = 60.0
+# How often the background pass looks; a section is therefore refreshed
+# somewhere between STATE_RESYNC_SECONDS and STATE_RESYNC_SECONDS + this.
+STATE_RESYNC_TICK_SECONDS = 30.0
+
+# Fields inside a state section that move on their own (wall clock, not player
+# action).  `seen` is last_active_time, and it changes on *every* command by
+# *any* player -- so including it in the change comparison made the `players`
+# section permanently unequal, and every movement pushed the whole roster to
+# every connected client.  The client re-renders relative ages locally on a 1s
+# tick (OOB-PROTOCOL.md 3.3), so these never need a push of their own: they
+# ride along on the next real change, or on the periodic resync.
+VOLATILE_STATE_FIELDS = ("seen",)
+
+
+def stable_state(value):
+    """A state section with its volatile fields stripped, for change
+    detection only.  What gets *sent* is always the full section."""
+    if isinstance(value, dict):
+        return {
+            k: stable_state(v)
+            for k, v in value.items()
+            if k not in VOLATILE_STATE_FIELDS
+        }
+    if isinstance(value, list):
+        return [stable_state(v) for v in value]
+    return value
+
 # Azimuth
 # Azaroth's Intelligent MultiUser Textual Habitat
 
@@ -58,6 +91,7 @@ class World:
         self.oob_sids = set()   # sids that hello'd OOB capability over `data`
         self.state_dirty = {}   # player_id -> set of section names to re-check
         self.state_last = {}    # player_id -> last sections actually sent
+        self.state_sent_at = {}  # player_id -> {section: monotonic time sent}
         self._state_seq = {}    # sid -> monotonically increasing seq counter
         self._last_resync = {}  # sid -> monotonic time of last resync
 
@@ -460,32 +494,83 @@ class World:
             "inventory": payload["inventory"],
             "players": payload["players"],
         }
+        now = time.monotonic()
+        self.state_sent_at[player.id] = {
+            k: now for k in ("room", "inventory", "players")
+        }
         self.emit("state", payload, to=sid)
 
     def flush_state(self):
-        """Recompute every marked section; emit one update per player that
-        actually changed.  Safe to call when nothing is dirty."""
+        """Recompute every marked section; emit one update per player whose
+        state actually changed.  Safe to call when nothing is dirty.
+
+        A section is sent when its *stable* content changed (see
+        stable_state).  A difference confined to volatile fields is not worth
+        a packet on its own -- with many players `seen` alone would have every
+        movement push the full roster to every client -- so it waits for the
+        next real change or for the periodic pass, whichever comes first.
+        """
         if not self.state_dirty:
             return
+        now = time.monotonic()
         for pid, sections in self.state_dirty.items():
             p = self.active_objects.get(pid)
             sid = p.connection if p is not None else None
             if not sid or sid not in self.oob_sids:
                 continue
             last = self.state_last.setdefault(pid, {})
-            payload = {"v": 1, "kind": "update", "seq": self._next_seq(sid)}
+            sent_at = self.state_sent_at.setdefault(pid, {})
+            payload = {"v": 1, "kind": "update"}
             changed = False
             for name in sections:
                 fresh = getattr(self, f"state_{name}")(p)
                 if fresh is None:
                     continue
-                if fresh != last.get(name):
-                    payload[name] = fresh
-                    last[name] = fresh
-                    changed = True
+                previous = last.get(name)
+                if fresh == previous:
+                    continue
+                if stable_state(fresh) == stable_state(previous) and (
+                    now - sent_at.get(name, 0.0) < STATE_RESYNC_SECONDS
+                ):
+                    continue  # volatile drift only, and recently sent
+                payload[name] = fresh
+                last[name] = fresh
+                sent_at[name] = now
+                changed = True
             if changed:
+                # Allocate the sequence number only now.  It used to be taken
+                # when the payload was built, so a flush that sent nothing
+                # still burned one -- and the client's gap check
+                # (OOB-PROTOCOL.md 8: seq > last_seq + 1 triggers a resync)
+                # would read the next real update as a dropped event.
+                payload["seq"] = self._next_seq(sid)
                 self.emit("state", payload, to=sid)
         self.state_dirty.clear()
+
+    def periodic_resync(self):
+        """Refresh any section a client has not been sent for
+        STATE_RESYNC_SECONDS.  Driven by a background task (see main.py),
+        because change-driven pushes deliberately skip volatile-only
+        differences and an idle world marks nothing dirty at all.
+
+        Marks the stale sections and defers to flush_state, so this cannot
+        emit anything flush_state would not: unchanged sections stay silent.
+        Returns the number of players considered.
+        """
+        now = time.monotonic()
+        considered = 0
+        for sid in list(self.oob_sids):
+            pid = self.active_sids.get(sid)
+            p = self.active_objects.get(pid) if pid else None
+            if p is None:
+                continue
+            considered += 1
+            sent_at = self.state_sent_at.setdefault(p.id, {})
+            for name in ("room", "inventory", "players"):
+                if now - sent_at.get(name, 0.0) >= STATE_RESYNC_SECONDS:
+                    self.state_dirty.setdefault(p.id, set()).add(name)
+        self.flush_state()
+        return considered
 
     def handle_register(self, sid, data):
         """Handles player registration."""
@@ -602,6 +687,8 @@ class World:
         # OOB: the world just changed for everyone who was watching it.
         self.oob_sids.discard(sid)
         self._state_seq.pop(sid, None)
+        self.state_last.pop(player_id, None)
+        self.state_sent_at.pop(player_id, None)
         self.mark_players_dirty()
         self.flush_state()
 

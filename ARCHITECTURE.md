@@ -27,7 +27,7 @@ as a "vibe coding" experiment and grown into a working engine with an AI layer:
 
 ### State as of writing
 
-- Tests: **100/100 passing** on the file backend (`python run-tests.py`) and on
+- Tests: **107/107 passing** on the file backend (`python run-tests.py`) and on
   sqlite (`python run-tests.py --db sqlite`) — game logic, storage contract
   (run against *both* backends in-process), the out-of-band state channel, and
   class composition (`tests/test_compose.py`).
@@ -58,7 +58,7 @@ as a "vibe coding" experiment and grown into a working engine with an AI layer:
 | `experiments/spacy_parser.py` | Unwired NLP parser experiment (spaCy + bagpipes_spacy) |
 | `OOB-PROTOCOL.md` | **Implemented** design (v1) of the out-of-band `state`/`data` socket channel — live who/inventory/room state + per-object verb summaries feeding the TUI's completion/dropdowns (`tests/test_oob.py` pins it) |
 | `db/` | World state (gitignored): one JSON file per object on the file backend, or `azimuth.db` on sqlite |
-| `requirements.txt` | Server deps; note the `mcp<2` pin (see §6.1) |
+| `requirements.txt` | Server **and client** deps; note the `mcp<2` pin (§6.1) and `websocket-client`, without which the socket.io clients silently fall back to HTTP long-polling (OOB-PROTOCOL.md §8) |
 
 ## 3. Setting up on a new machine
 
@@ -68,10 +68,10 @@ git clone <repo> && cd azimuth
 
 # 2. Fresh venv (venvs don't move)
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt prompt_toolkit   # prompt_toolkit: needed by client.py, not yet in requirements
+.venv/bin/pip install -r requirements.txt
 
 # 3. Verify
-.venv/bin/python run-tests.py      # expect 39/39 passed (add --db sqlite for the sqlite backend)
+.venv/bin/python run-tests.py      # expect 107/107 passed (add --db sqlite for the sqlite backend)
 
 # 4. Run
 .venv/bin/python run.py            # server on 0.0.0.0:5001
@@ -423,7 +423,7 @@ either rewrite or delete it.
 
 - ~~**`Lockable` message keys missing**~~ — **fixed**: the
   `toggle_locked_*` keys are in `Lockable.default_messages` now (`@addmixin
-  <thing> to Lockable` made the blank replies impossible to ignore).
+  Lockable to <thing>` made the blank replies impossible to ignore).
 - **`unlock` shares the old pattern** — failure message then unconditional
   `toggle_off` (no `return`); only bites when `locked_by_player` is set, which
   nothing in the current world does. Mirror the `lock` fix if you wire up

@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import os
 import time
 
@@ -8,8 +10,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
+from . import world as world_mod
 from .persistence import MlStorage, SimpleFileStorage, SqliteStorage
 from .world import setup_world
+
+logger = logging.getLogger(__name__)
 
 dotenv.load_dotenv()
 
@@ -153,6 +158,28 @@ async def data(sid, body):
         pid = world.active_sids.get(sid)
         if pid is not None and pid in world.active_objects:
             world.push_init(world.active_objects[pid])
+
+
+@app.on_event("startup")
+async def start_state_resync():
+    """Background pass that keeps the out-of-band state channel honest.
+
+    Change-driven pushes deliberately skip differences confined to volatile
+    fields (`seen`), and an idle world marks nothing dirty at all, so without
+    this a client's timestamps would drift indefinitely and a missed update
+    would never be repaired.  It marks stale sections and defers to
+    flush_state, so it emits nothing that a real change would not.
+    """
+
+    async def loop():
+        while True:
+            await asyncio.sleep(world_mod.STATE_RESYNC_TICK_SECONDS)
+            try:
+                world.periodic_resync()
+            except Exception:
+                logger.exception("periodic state resync failed")
+
+    asyncio.create_task(loop())
 
 
 @app.on_event("shutdown")

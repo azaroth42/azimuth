@@ -87,7 +87,10 @@ fresh.
 - `kind` — `init` = full snapshot (all sections present; sent on login and on
   `resync`); `update` = only the sections that changed (any may be absent).
 - `seq` — per-connection, monotonically increasing, starts at 1, increments by
-  1 per `state` event (init or update). Used for gap detection (§8).
+  1 per `state` event (init or update). Used for gap detection (§8). It is
+  allocated **only when an event is actually emitted**: a flush that finds
+  nothing worth sending must not consume a number, or the next real update
+  reads as a dropped event and every client asks for a resync.
 - Section **order is irrelevant**; clients apply by key.
 
 ### 4.2 Client operations (client→server, event `data`)
@@ -176,7 +179,12 @@ carried, wielded, worn).
   *locally*, so entries don't need re-pushing as time passes. `self` marks the
   requesting player (for styling / "you" suffix).
 - Pushed only on membership or location change; `seen` is refreshed in-band
-  with those pushes.
+  with those pushes. `seen` is a **volatile field**: it moves on every command
+  by any player, so it is excluded from the change comparison
+  (`world.VOLATILE_STATE_FIELDS`, `world.stable_state`). Including it made this
+  section permanently unequal, so every movement pushed the whole roster to
+  every connected client. A difference confined to volatile fields waits for
+  the next real change, or for the periodic resync (§8).
 
 **Thing summary** (shared by `room.things`, `room.exits`, `inventory`):
 
@@ -478,7 +486,27 @@ tick refreshes the relative times from `seen`). The ROOM/EXITS/IN ROOM/
 CARRYING sections render from the model when `oob`, from parsed text
 otherwise. Exit rows show their `state` (`closed`, `locked`) when non-null.
 
-## 8. Ordering, loss, resync
+## 8. Cadence, ordering, loss, resync
+
+**Cadence.** Two rules, and they are what keep the channel affordable with
+many players:
+
+1. **Push on a real change.** A section is emitted when its *stable* content
+   changed — the section with volatile fields (`seen`) stripped. Ordinary
+   chatter (`say`, `look`, `inventory`) changes nothing and emits nothing.
+2. **Otherwise, at most once per `STATE_RESYNC_SECONDS`** (60). A background
+   task (`World.periodic_resync`, ticked every `STATE_RESYNC_TICK_SECONDS`
+   = 30 from `main.py`'s startup hook) marks any section a client has not been
+   sent for that long and defers to `flush_state`, so it can never emit
+   anything a real change would not. This is what stops volatile drift from
+   accumulating, and it is the repair path for a client that missed an update.
+
+**Transport.** The socket.io *client* needs `websocket-client` installed or
+python-engineio silently falls back to HTTP long-polling — a continuous
+GET/POST stream per connected player (~18 requests/minute each while idle),
+which is what actually gets overwhelming at scale, independently of anything
+above. It is in `requirements.txt`; `SocketSession` logs the negotiated
+transport so a fallback is visible rather than silent.
 
 Socket.IO (both transports) is reliable and in-order per connection, so no
 acks are needed for correctness. Defensively:

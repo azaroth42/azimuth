@@ -106,8 +106,8 @@ switching the server over is just `AZIMUTH_DB_TYPE=sqlite` in `.env`).
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt prompt_toolkit
-.venv/bin/python run-tests.py      # verify: 28/28 passed
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python run-tests.py      # verify: 107/107 passed
 .venv/bin/python run.py            # server on 0.0.0.0:5001 (uvicorn, --reload)
 ```
 
@@ -181,7 +181,7 @@ exit), `@create <name> as <class>`, `@chparent <obj> to <class>`, `@rename <obj>
 `@message <name> on <obj> as "<text>"` (runtime text editing), `@dumpdb`.
 
 Composition and verbs: `@mixins [<obj>]` (what a thing is made of, and the
-vocabulary), `@addmixin <obj> to <Mixin>`, `@rmmixin <obj> from <Mixin>`,
+vocabulary), `@addmixin <Mixin> to <obj>`, `@rmmixin <Mixin> from <obj>`,
 `@verbs [<Class|obj>]`, `@verb <Class|obj> <name> [<verbs/dobj/prep/iobj>]
 <code>`, `@rmverb <Class|obj> <name>`. Stored verb source is written on one
 line with `\n` for newlines, and calls `super(cls, self)` rather than a bare

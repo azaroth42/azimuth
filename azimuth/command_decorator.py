@@ -2,8 +2,8 @@ import inspect
 
 
 def get_my_info():
-    code = inspect.currentframe().f_back.f_code
-    qn = code.co_qualname
+    # code = inspect.currentframe().f_back.f_code
+    # qn = code.co_qualname
     # FIXME: now would need to import it as a function
     # not sure this is actually useful?
     fn = None

@@ -1,8 +1,3 @@
-### Vase: containable, not openable
-### Bag: containable, openable, not lockable
-### Chest: containable, openable, lockable
-### Small Window: not containable, openable, lockable?
-
 from azimuth.command_decorator import make_command
 
 
@@ -165,9 +160,7 @@ class Lockable(Openable):
         self.lock_paired_object = lpo
 
     def state_summary(self):
-        return super().state_summary() + [
-            "locked" if self.is_locked else "unlocked"
-        ]
+        return super().state_summary() + ["locked" if self.is_locked else "unlocked"]
 
     @make_command("open", "self")
     def open(self, player, prep=None, verb=None):
@@ -350,10 +343,14 @@ class Switchable(StateToggle):
     # --- commands ---
     # Many natural phrasings for the same action; the handler (power) decides
     # on vs off from the preposition or the verb:
-    @make_command(["turn", "switch", "power"], "", ["on", "off"], "self")  # turn on the lamp
-    @make_command(["turn", "switch", "power"], "self", ["on", "off"])       # turn the lamp on
-    @make_command(["activate", "deactivate"], "self")                       # activate the lamp
-    @make_command(["on", "off"], "self")                                    # on the lamp
+    @make_command(
+        ["turn", "switch", "power"], "", ["on", "off"], "self"
+    )  # turn on the lamp
+    @make_command(
+        ["turn", "switch", "power"], "self", ["on", "off"]
+    )  # turn the lamp on
+    @make_command(["activate", "deactivate"], "self")  # activate the lamp
+    @make_command(["on", "off"], "self")  # on the lamp
     def power(self, player, target=None, prep=None, verb=None):
         """Turn this thing on or off (and drive its paired device, if any)."""
         if prep == "off" or verb in ("deactivate", "off"):
@@ -435,7 +432,7 @@ class Positionable:
         # Re-establish each child's back-reference so move_to() cleanup and
         # find_position() keep working after a load.
         for entries in self.positioned.values():
-            for (t, _v) in entries:
+            for t, _v in entries:
                 t._position_parent = self
 
     # --- persistence / state (consulted by BaseThing.to_dict) ---
@@ -566,7 +563,7 @@ class Positionable:
         """What is positioned relative to this thing (when you look at it)."""
         lines = [super().look_at(who)]
         for pos, entries in self.positioned.items():
-            for (t, verb) in entries:
+            for t, verb in entries:
                 lines.append(self.position_line(t, pos, verb))
         return join_look(*lines)
 

@@ -1167,21 +1167,21 @@ class Programmer(Player):
         player.tell(f"You change the parent of {what} to {cls.__name__}.")
 
     @make_command("@addmixin", "any", "to", "any")
-    def add_mixin(self, player, what, mixin, prep=None, verb=None):
-        """@addmixin <thing> to <Mixin> -- give an existing object a new
+    def add_mixin(self, player, mixin, what, prep=None, verb=None):
+        """@addmixin <Mixin> to <thing> -- give an existing object a new
         capability, with no new Python: the class for base + mixins is
         composed on the spot (or a hand-written one is picked up, if the
         combination has one)."""
         if not what or not mixin:
-            player.tell("Usage: @addmixin <thing> to <Mixin>")
+            player.tell("Usage: @addmixin <Mixin> to <thing>")
             return
         self._recompose(player, what, f"also {mixin}", add=[mixin.strip()])
 
     @make_command("@rmmixin", "any", ["from"], "any")
-    def remove_mixin(self, player, what, mixin, prep=None, verb=None):
-        """@rmmixin <thing> from <Mixin> -- take a capability away again."""
+    def remove_mixin(self, player, mixin, what, prep=None, verb=None):
+        """@rmmixin <Mixin> from <thing> -- take a capability away again."""
         if not what or not mixin:
-            player.tell("Usage: @rmmixin <thing> from <Mixin>")
+            player.tell("Usage: @rmmixin <Mixin> from <thing>")
             return
         self._recompose(player, what, f"no longer {mixin}", remove=[mixin.strip()])
 
@@ -1223,7 +1223,9 @@ class Programmer(Player):
 
         bits = (argstr or "").split(None, 2)
         if len(bits) < 2:
-            player.tell("Usage: @verb <Class|thing> <name> [<verbs/dobj/prep/iobj>] <code>")
+            player.tell(
+                "Usage: @verb <Class|thing> <name> [<verbs/dobj/prep/iobj>] <code>"
+            )
             return
         name = self._verb_target(player, bits[0])
         if name is None:

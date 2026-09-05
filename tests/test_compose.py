@@ -13,7 +13,24 @@ from azimuth.mixins import Containable, Lockable, Openable
 from .framework import AzimuthTest, TestWorld
 
 
-class NormalizeTest(AzimuthTest):
+class ComposeTest(AzimuthTest):
+    """Shared fixture.  The test world is a copy of the real db/, which play
+    rearranges and can recompose, so these tests build their own subject in
+    the start room rather than borrowing the demo gem or chest."""
+
+    def subject(self, name="test widget", cls_name="Object", **data):
+        w = self.tw.world
+        start = w.get_object(w.config["start_room_id"])
+        obj = w.compose(cls_name)(
+            None, w, {"name": name, "description": "A test widget.",
+                      "location": start.id, **data}
+        )
+        obj._save()
+        w.flush_state()
+        return obj
+
+
+class NormalizeTest(ComposeTest):
     def test_redundant_ancestor_dropped(self):
         """Lockable implies Openable, so naming both is the same combination
         as naming Lockable -- otherwise one thing could have two classes."""
@@ -37,7 +54,7 @@ class NormalizeTest(AzimuthTest):
         raise AssertionError("an unknown mixin name must not resolve")
 
 
-class ResolutionTest(AzimuthTest):
+class ResolutionTest(ComposeTest):
     def test_handwritten_class_wins(self):
         """A combination with a class in the codebase uses it, keeping its
         overrides, rather than being synthesized."""
@@ -67,7 +84,7 @@ class ResolutionTest(AzimuthTest):
         assert a is b
 
 
-class PersistenceTest(AzimuthTest):
+class PersistenceTest(ComposeTest):
     def _reload(self, obj):
         """Round-trip an object through storage, bypassing the live cache."""
         w = self.tw.world
@@ -85,8 +102,8 @@ class PersistenceTest(AzimuthTest):
         assert data["mixins"] == ["Containable", "Lockable"]
 
     def test_handwritten_composite_stored_the_same_way(self):
-        chest = self.tw.world.get_object_by_name("sturdy chest")
-        data = chest.to_dict()
+        box = self.subject("test box", "Container")
+        data = box.to_dict()
         assert data["class"] == "Object" and data["mixins"] == ["Containable"]
 
     def test_legacy_class_name_still_loads(self):
@@ -118,78 +135,78 @@ class PersistenceTest(AzimuthTest):
         assert BigChest(None, w, {"name": "big chest"}).to_dict()["class"] == "BigChest"
 
 
-class ClassFilterTest(AzimuthTest):
+class ClassFilterTest(ComposeTest):
     """The storage `clss` filter is isinstance semantics now: a stored object
     records a base plus mixins, so a name comparison could not match it."""
 
     def test_filter_matches_base_and_composite(self):
         w = self.tw.world
-        w.dump_database()
-        assert w.db.get_object_by_name("sturdy chest", Container) is not None
-        assert w.db.get_object_by_name("sturdy chest", Object) is not None
-        assert w.db.get_object_by_name("sturdy chest", Place) is None
+        self.subject("test box", "Container")
+        assert w.db.get_object_by_name("test box", Container) is not None
+        assert w.db.get_object_by_name("test box", Object) is not None
+        assert w.db.get_object_by_name("test box", Place) is None
 
     def test_filter_rejects_a_more_derived_class(self):
         w = self.tw.world
-        w.dump_database()
+        self.subject("test box", "Container")
         lockbox = w.classes.resolve("Object", ["Containable", "Lockable"])
-        assert w.db.get_object_by_name("sturdy chest", lockbox) is None
+        assert w.db.get_object_by_name("test box", lockbox) is None
 
     def test_get_all_objects_is_polymorphic(self):
         w = self.tw.world
-        w.dump_database()
+        self.subject("test box", "Container")  # Object + Containable
         names = {o["name"] for o in w.db.get_all_objects(Object)}
-        assert "sturdy chest" in names, names  # Object + Containable
+        assert "test box" in names, names
         assert "The Starting Chamber" not in names
 
 
-class AddMixinTest(AzimuthTest):
+class AddMixinTest(ComposeTest):
     def test_addmixin_grants_the_verbs(self):
         wiz = self.wizard()
-        gem = self.place_object("shiny gem", self.tw.world.get_object(
-            self.tw.world.config["start_room_id"]))
-        self.assert_msg(wiz.send("open gem"), "I don't understand that.")
-        self.assert_msg(wiz.send("@addmixin gem to Openable"), "OpenableObject")
-        self.assert_msg(wiz.send("close gem"), "You close shiny gem")
-        assert self.tw.world.get_object(gem.id).is_open is False
+        widget = self.subject()
+        self.assert_msg(wiz.send("open widget"), "I don't understand that.")
+        self.assert_msg(wiz.send("@addmixin Openable to widget"), "OpenableObject")
+        self.assert_msg(wiz.send("close widget"), "You close test widget")
+        assert self.tw.world.get_object(widget.id).is_open is False
 
     def test_rebuild_keeps_one_instance_in_the_room(self):
         """Recomposing replaces the instance; the dead one must not be left
         sitting in its room's contents (the room listed it twice)."""
         wiz = self.wizard()
         start = self.tw.world.get_object(self.tw.world.config["start_room_id"])
-        gem = self.place_object("shiny gem", start)
-        wiz.send("@addmixin gem to Switchable")
-        again = self.tw.world.get_object(gem.id)
-        assert again is not gem
+        widget = self.subject()
+        wiz.send("@addmixin Switchable to widget")
+        again = self.tw.world.get_object(widget.id)
+        assert again is not widget
         assert start.contents.count(again) == 1
-        assert gem not in start.contents
+        assert widget not in start.contents
 
     def test_rebuild_reseats_references(self):
         """held_by (and every other back-reference) points at the instance,
         which the rebuild replaces."""
         wiz = self.wizard()
-        sword = self.place_object("rusty sword", wiz.player)
-        sword.held_by = wiz.player
-        wiz.send("@addmixin rusty sword to Wearable")
-        again = self.tw.world.get_object(sword.id)
+        widget = self.subject("held widget", "HeldObject")
+        widget.move_to(wiz.player)
+        widget.held_by = wiz.player
+        wiz.send("@addmixin Wearable to held widget")
+        again = self.tw.world.get_object(widget.id)
         assert again.held_by is wiz.player
         assert wiz.player.contents.count(again) == 1
 
     def test_rmmixin_names_the_implying_mixin(self):
         wiz = self.wizard()
-        self.place_object("shiny gem", self.tw.world.get_object(
-            self.tw.world.config["start_room_id"]))
-        wiz.send("@addmixin gem to Lockable")
+        self.subject()
+        wiz.send("@addmixin Lockable to widget")
         self.assert_msg(
-            wiz.send("@rmmixin gem from Openable"),
+            wiz.send("@rmmixin Openable from widget"),
             "Openable comes with Lockable",
         )
-        self.assert_msg(wiz.send("@rmmixin gem from Lockable"), "no longer Lockable")
+        self.assert_msg(wiz.send("@rmmixin Lockable from widget"), "no longer Lockable")
 
     def test_unknown_mixin_is_a_message(self):
         wiz = self.wizard()
-        self.assert_msg(wiz.send("@addmixin gem to Nonsense"), "Cannot do that")
+        self.subject()
+        self.assert_msg(wiz.send("@addmixin Nonsense to widget"), "Cannot do that")
 
 
 RUB = (
@@ -203,40 +220,39 @@ LOOK = (
 )
 
 
-class StoredVerbTest(AzimuthTest):
-    def _gem(self, wiz):
-        self.place_object("shiny gem", self.tw.world.get_object(
-            self.tw.world.config["start_room_id"]))
-        wiz.send("@addmixin gem to Switchable")
+class StoredVerbTest(ComposeTest):
+    def _widget(self, wiz):
+        self.subject()
+        wiz.send("@addmixin Switchable to widget")
 
     def test_verb_from_the_database_dispatches(self):
         wiz = self.wizard()
-        self._gem(wiz)
+        self._widget(wiz)
         self.assert_msg(
             wiz.send(f"@verb SwitchableObject rub rub/self/-/- {RUB}"), "Stored"
         )
-        self.assert_msg(wiz.send("rub gem"), "The shiny gem glows.")
+        self.assert_msg(wiz.send("rub widget"), "The test widget glows.")
 
     def test_super_needs_the_injected_cls(self):
         """exec'd code has no __class__ cell, so a bare super() cannot work;
         stored code calls super(cls, self), and it must reach the override
         it shadows."""
         wiz = self.wizard()
-        self._gem(wiz)
+        self._widget(wiz)
         wiz.send(f"@verb SwitchableObject look look/self/-/- {LOOK}")
         self.assert_msg(
-            wiz.send("look gem"), "A brightly shining gemstone", "It hums faintly."
+            wiz.send("look widget"), "A test widget.", "It hums faintly."
         )
 
     def test_broken_source_is_refused_not_stored(self):
         wiz = self.wizard()
-        self._gem(wiz)
+        self._widget(wiz)
         self.assert_msg(
             wiz.send("@verb SwitchableObject bad bad/self/-/- def bad(self, player:"),
             "Verb not stored",
         )
         assert "bad" not in self.tw.world.classes.stored_verbs("SwitchableObject")
-        self.assert_msg(wiz.send("rub gem"), "I don't understand that.")
+        self.assert_msg(wiz.send("rub widget"), "I don't understand that.")
 
     def test_verb_survives_a_restart(self):
         from azimuth.world import setup_world
@@ -244,27 +260,27 @@ class StoredVerbTest(AzimuthTest):
         from .framework import WORLD_ID
 
         wiz = self.wizard()
-        self._gem(wiz)
+        self._widget(wiz)
         wiz.send(f"@verb SwitchableObject rub rub/self/-/- {RUB}")
         self.tw.world.dump_database()
         again = setup_world(self.tw.storage, WORLD_ID)
-        gem = again.get_object_by_name("shiny gem")
+        gem = again.get_object_by_name("test widget")
         assert "rub" in gem.get_commands()
         assert getattr(type(gem).__dict__.get("rub"), "_az_stored", False)
 
     def test_rmverb_removes_it(self):
         wiz = self.wizard()
-        self._gem(wiz)
+        self._widget(wiz)
         wiz.send(f"@verb SwitchableObject rub rub/self/-/- {RUB}")
-        self.assert_msg(wiz.send("@rmverb gem rub"), "Removed")
-        self.assert_msg(wiz.send("rub gem"), "I don't understand that.")
+        self.assert_msg(wiz.send("@rmverb widget rub"), "Removed")
+        self.assert_msg(wiz.send("rub widget"), "I don't understand that.")
 
     def test_verbs_do_not_leak_between_worlds(self):
         """Stored verbs hang on a per-world subclass, never on the shared
         hand-written class -- otherwise one world (or one test) would rewrite
         another's behaviour."""
         wiz = self.wizard()
-        self._gem(wiz)
+        self._widget(wiz)
         wiz.send(f"@verb SwitchableObject rub rub/self/-/- {RUB}")
         other = TestWorld(db_type=self.tw.db_type)
         try:

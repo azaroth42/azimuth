@@ -245,6 +245,23 @@ class SocketSession:
         def connect() -> None:  # noqa: F811
             session._user_initiated = False
             session._publish(ServerEvent("status", "connected"))
+            # Say which transport we got.  Without the `websocket-client`
+            # package python-engineio falls back to HTTP long-polling
+            # *silently*, and every connected player then costs the server a
+            # continuous GET/POST stream (OOB-PROTOCOL.md 8).  Cheap to print,
+            # and it makes that failure mode obvious instead of invisible.
+            try:
+                transport = client.transport()
+            except Exception:
+                transport = None
+            if transport and transport != "websocket":
+                session._publish(
+                    ServerEvent(
+                        "message",
+                        f"  (connected over {transport}, not websocket -- "
+                        f"install websocket-client to stop polling)",
+                    )
+                )
             # Announce out-of-band capability (OOB-PROTOCOL.md §4.2).  The
             # server tags this sid and will now push structured `state`.
             try:

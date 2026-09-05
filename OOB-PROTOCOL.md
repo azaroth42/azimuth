@@ -387,9 +387,44 @@ events, and the flush also covers `on_disconnect` (mark-all + flush there).
 7. **Programmer-tier data stays out.** `messages`/`functions`/`properties` and
    `@messages`-style tables are never on the channel.
 
-## 7. Client side (`tui_client.py`)
+## 7. Client side
 
-### 7.1 `SocketSession`
+Two clients speak the channel: `tui_client.py` (Textual, described below) and
+the browser client (`azimuth/templates/index.html`). They implement the same
+model and the same verb-to-command mapping, so the same object offers the same
+actions in both.
+
+### 7.0 Browser client (`azimuth/templates/index.html`)
+
+Same shape as the TUI, with the mouse as the primary input:
+
+- `hello` on connect; the model is dropped on disconnect so nothing stale
+  survives a reconnect.
+- Side panel rendered from the model: **Exits**, **In room**, **Carrying**,
+  **Players**. State strings become badges (`closed`, `locked`, `held`,
+  `worn`); `contents` renders as a nested list, and only appears when the
+  server chose to include it.
+- **Click a name** to run its default action -- `go` for an exit, `look` for
+  anything else. **`▾` or right-click** opens the full verb menu built from
+  that object's `verbs`. A row the client can fill completely is sent as-is;
+  one with an open slot (`put <object> in chest`) is staged in the input with
+  the cursor in the gap rather than sent. The default action deliberately
+  prefers the plainest registered shape (`walk west`, not `walk through
+  west`), since several shapes usually match and the click must be stable.
+- Tab completion from the model: the first word against `self.verbs`, later
+  words against every referenceable name.
+- `seq` gap detection: a missing update triggers `{"op":"resync"}` (§8).
+- Everything is rendered with `textContent`, never `innerHTML` -- names and
+  messages are world data written by other players.
+
+Because a click just sends the text command on the ordinary `command` channel,
+the server cannot tell a click from typing, and no authority moves client-side:
+the menu can only ever contain verbs the server already said this player may
+use on this object (§5.3, §6).
+
+### 7.1 TUI client (`tui_client.py`)
+
+#### `SocketSession`
 
 - In `_make_client`, register:
 
@@ -405,7 +440,7 @@ events, and the flush also covers `on_disconnect` (mark-all + flush there).
 - On each successful transport `connect`, emit `data` `{"op":"hello","v":1}`.
 - Expose `session.request_resync()` → emits `{"op":"resync"}` (debounced).
 
-### 7.2 `WorldModel` (new small class in the client)
+#### `WorldModel`
 
 ```python
 class WorldModel:
@@ -421,7 +456,7 @@ The app holds one model; `_dispatch` routes `state` events into it (the payload
 is JSON-decoded) and then calls `_refresh_panel()` — which is *already* a
 method; it just reads the model instead of (see 7.3) the parsed-text fields.
 
-### 7.3 Feature negotiation & fallback
+#### Feature negotiation & fallback
 
 - The app starts with `_text_harvest = True` and `_oob = False`: the existing
   regex pipeline runs out of the box (old-server behavior is unchanged).
@@ -435,7 +470,7 @@ method; it just reads the model instead of (see 7.3) the parsed-text fields.
   reconnect re-logins and re-negotiates (a fresh `init` arrives, or the text
   fallback takes over against an old server).
 
-### 7.4 Model-driven completion
+#### Model-driven completion
 
 - **First word (verb):** if `oob`, the verb pool is the *server's* verb list —
   the `self.verbs` entries (display alias = longest; all aliases accepted as
@@ -448,7 +483,7 @@ method; it just reads the model instead of (see 7.3) the parsed-text fields.
 - **`whisper`** → `model.player_pool()` (same as today's harvested `@who`
   names, but live and not dependent on having typed `@who`).
 
-### 7.5 The verb dropdown
+#### The verb dropdown
 
 New key **F5** ("verbs for selected object") + mouse click on a name in the
 side panel (which sets the *selected object*). Behavior:
@@ -479,7 +514,7 @@ This is the concrete payoff of the per-object `verbs` summary: **the client
 offers exactly the verbs the server will accept, with the right argument
 shapes.**
 
-### 7.6 Side panel
+#### Side panel
 
 Gains a **PLAYERS** section (live `@who`: `name — <room>  <N s ago>`, a 1 s
 tick refreshes the relative times from `seen`). The ROOM/EXITS/IN ROOM/
@@ -526,7 +561,7 @@ acks are needed for correctness. Defensively:
 | old | old | today's behavior (text parsing) |
 | old | new | `state` events ignored (unknown event); `data` never sent; everything as today |
 | new | old | no `state` ever arrives → text harvesting stays on → today's text-parsing behavior |
-| new | new | full OOB: live panel, model completion, verb dropdown |
+| new | new | full OOB: live panel, model completion, verb dropdown / click-to-act |
 
 No client is ever *worse* off by the upgrade on either side — the in-band
 `message` stream is untouched, so the game is fully playable through it.

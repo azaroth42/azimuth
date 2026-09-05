@@ -1,353 +1,719 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Azimuth MUD Client</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
-    <style>
-        body {
-            font-family: 'Courier New', monospace;
-            margin: 0;
-            padding: 20px;
-            background-color: #1a1a1a;
-            color: #00ff00;
-            height: 100vh;
-            display: flex;
-            flex-direction: column;
-        }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Azimuth MUD</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.4/socket.io.js"></script>
+<style>
+  :root {
+    --bg: #0b0f0b;
+    --panel: #0f150f;
+    --line: #1e3a1e;
+    --fg: #b8f5b8;
+    --dim: #5f8a5f;
+    --accent: #45ff8a;
+    --warn: #ffd166;
+    --bad: #ff6b6b;
+    --chip: #142014;
+    --chip-hi: #1d301d;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.45 'SF Mono', 'Cascadia Mono', Menlo, Consolas, 'Courier New', monospace;
+    display: flex;
+    flex-direction: column;
+  }
 
-        .header {
-            text-align: center;
-            margin-bottom: 20px;
-            border-bottom: 2px solid #00ff00;
-            padding-bottom: 10px;
-        }
+  /* --- header ------------------------------------------------------- */
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+    flex: none;
+  }
+  .brand { color: var(--accent); font-weight: 700; letter-spacing: .08em; }
+  .room-name { color: var(--fg); font-weight: 600; }
+  .spacer { flex: 1; }
+  .who { color: var(--dim); }
+  .conn { padding: 2px 8px; border: 1px solid currentColor; border-radius: 999px; font-size: 12px; color: var(--bad); }
+  .conn.up { color: var(--accent); }
+  header button {
+    background: transparent; color: var(--dim); border: 1px solid var(--line);
+    border-radius: 4px; padding: 3px 9px; font: inherit; font-size: 12px; cursor: pointer;
+  }
+  header button:hover { color: var(--fg); border-color: var(--dim); }
 
-        .game-container {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            min-height: 0;
-        }
+  /* --- layout ------------------------------------------------------- */
+  main { flex: 1; display: flex; min-height: 0; }
+  #log-wrap { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #log {
+    flex: 1; overflow-y: auto; padding: 12px 14px;
+    white-space: pre-wrap; word-wrap: break-word;
+  }
+  .line { padding: 1px 0; }
+  .line.echo { color: var(--accent); }
+  .line.sys { color: var(--dim); font-style: italic; }
+  .line.err { color: var(--bad); }
+  .ts { color: #33502f; font-size: 11px; }
 
-        .status-bar {
-            background-color: #333;
-            padding: 10px;
-            border: 1px solid #00ff00;
-            margin-bottom: 10px;
-            border-radius: 3px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
+  aside {
+    flex: none; width: 290px; border-left: 1px solid var(--line);
+    background: var(--panel); overflow-y: auto; padding: 10px 10px 24px;
+  }
+  aside section { margin-bottom: 14px; }
+  aside h2 {
+    font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--dim); margin: 0 0 6px; font-weight: 600;
+  }
+  aside ul { list-style: none; margin: 0; padding: 0; }
+  aside li { margin: 0 0 3px; }
+  aside li ul { margin: 3px 0 3px 14px; padding-left: 8px; border-left: 1px solid var(--line); }
+  .empty { color: #3c563c; font-style: italic; font-size: 12px; }
 
-        .connection-status {
-            color: #ff4444;
-            font-weight: bold;
-        }
+  /* --- clickable things --------------------------------------------- */
+  .row { display: flex; align-items: stretch; }
+  .chip, .more {
+    background: var(--chip); color: var(--fg); border: 1px solid var(--line);
+    font: inherit; cursor: pointer; padding: 3px 8px; text-align: left;
+  }
+  .chip { border-radius: 4px 0 0 4px; border-right: none; flex: 1; min-width: 0; }
+  .more { border-radius: 0 4px 4px 0; color: var(--dim); padding: 3px 6px; }
+  .chip:hover, .more:hover, .chip:focus, .more:focus { background: var(--chip-hi); color: var(--accent); outline: none; }
+  .badge {
+    margin-left: 6px; font-size: 10.5px; padding: 0 5px; border-radius: 999px;
+    background: #21331f; color: var(--dim); border: 1px solid var(--line);
+  }
+  .badge.closed, .badge.locked { color: var(--warn); }
+  .badge.held, .badge.worn, .badge.on { color: var(--accent); }
 
-        .connection-status.connected {
-            color: #44ff44;
-        }
+  /* players */
+  .player { display: flex; gap: 6px; align-items: baseline; padding: 2px; }
+  .player .nm { color: var(--fg); }
+  .player.self .nm { color: var(--accent); }
+  .player .loc { color: var(--dim); font-size: 12px; flex: 1; min-width: 0;
+                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .player .ago { color: #3c563c; font-size: 11px; }
 
-        .output-container {
-            flex: 1;
-            border: 2px solid #00ff00;
-            border-radius: 5px;
-            background-color: #0a0a0a;
-            overflow: hidden;
-            display: flex;
-            flex-direction: column;
-            min-height: 200px;
-        }
+  /* --- verb menu ----------------------------------------------------- */
+  #menu {
+    position: fixed; z-index: 50; min-width: 190px; max-width: 320px;
+    background: #0d140d; border: 1px solid var(--dim); border-radius: 6px;
+    box-shadow: 0 8px 26px rgba(0,0,0,.6); padding: 4px; max-height: 60vh; overflow-y: auto;
+  }
+  #menu .title {
+    font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--dim); padding: 4px 8px 6px; border-bottom: 1px solid var(--line); margin-bottom: 4px;
+  }
+  #menu button {
+    display: block; width: 100%; text-align: left; background: transparent;
+    color: var(--fg); border: 0; border-radius: 4px; font: inherit;
+    padding: 5px 8px; cursor: pointer;
+  }
+  #menu button:hover, #menu button:focus { background: var(--chip-hi); color: var(--accent); outline: none; }
+  #menu button .gap { color: var(--warn); }
+  #menu .none { color: var(--dim); padding: 6px 8px; font-style: italic; }
 
-        #output {
-            flex: 1;
-            padding: 15px;
-            overflow-y: auto;
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            font-size: 14px;
-            line-height: 1.4;
-        }
+  /* --- input --------------------------------------------------------- */
+  form {
+    flex: none; display: flex; gap: 8px; padding: 10px 14px;
+    border-top: 1px solid var(--line); background: var(--panel);
+  }
+  #cmd {
+    flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 4px; padding: 9px 10px; font: inherit; outline: none;
+  }
+  #cmd:focus { border-color: var(--dim); }
+  form button {
+    background: #16301f; color: var(--accent); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 18px; font: inherit; cursor: pointer;
+  }
+  form button:hover { background: #1d3f28; }
+  .hint { flex: none; padding: 0 14px 8px; color: #3c563c; font-size: 11.5px; background: var(--panel); }
 
-        .input-container {
-            margin-top: 10px;
-            display: flex;
-            gap: 10px;
-        }
+  #log::-webkit-scrollbar, aside::-webkit-scrollbar, #menu::-webkit-scrollbar { width: 10px; }
+  #log::-webkit-scrollbar-thumb, aside::-webkit-scrollbar-thumb, #menu::-webkit-scrollbar-thumb {
+    background: #1e3a1e; border-radius: 5px;
+  }
 
-        #commandInput {
-            flex: 1;
-            background-color: #0a0a0a;
-            color: #00ff00;
-            border: 2px solid #00ff00;
-            padding: 10px;
-            font-family: 'Courier New', monospace;
-            font-size: 14px;
-            border-radius: 3px;
-            outline: none;
-            resize: vertical;
-            min-height: 40px;
-            max-height: 150px;
-            overflow-y: auto;
-        }
-
-        #commandInput:focus {
-            border-color: #44ff44;
-            box-shadow: 0 0 10px rgba(0, 255, 0, 0.3);
-        }
-
-        .send-button {
-            background-color: #003300;
-            color: #00ff00;
-            border: 2px solid #00ff00;
-            padding: 10px 20px;
-            font-family: 'Courier New', monospace;
-            cursor: pointer;
-            border-radius: 3px;
-            transition: background-color 0.2s;
-        }
-
-        .send-button:hover {
-            background-color: #004400;
-        }
-
-        .send-button:active {
-            background-color: #005500;
-        }
-
-        .clear-button {
-            background-color: #330000;
-            color: #ff4444;
-            border: 2px solid #ff4444;
-            padding: 5px 10px;
-            font-family: 'Courier New', monospace;
-            cursor: pointer;
-            border-radius: 3px;
-            font-size: 12px;
-        }
-
-        .clear-button:hover {
-            background-color: #440000;
-        }
-
-        .message {
-            margin-bottom: 5px;
-            padding: 2px 0;
-        }
-
-        .message.system {
-            color: #ffff00;
-        }
-
-        .message.error {
-            color: #ff4444;
-        }
-
-        .message.info {
-            color: #4444ff;
-        }
-
-        .timestamp {
-            color: #666;
-            font-size: 12px;
-        }
-
-        .help-text {
-            color: #888;
-            font-size: 12px;
-            margin-top: 5px;
-        }
-
-        /* Scrollbar styling */
-        #output::-webkit-scrollbar {
-            width: 12px;
-        }
-
-        #output::-webkit-scrollbar-track {
-            background: #1a1a1a;
-        }
-
-        #output::-webkit-scrollbar-thumb {
-            background: #00ff00;
-            border-radius: 6px;
-        }
-
-        #output::-webkit-scrollbar-thumb:hover {
-            background: #44ff44;
-        }
-    </style>
+  @media (max-width: 820px) {
+    aside { display: none; }
+  }
+</style>
 </head>
 <body>
-    <div class="header">
-        <h1>Azimuth MUD</h1>
-    </div>
 
-    <div class="game-container">
-        <div class="status-bar">
-            <div>
-                <span class="connection-status" id="connectionStatus">Disconnected</span>
-                <span id="playerInfo"></span>
-            </div>
-            <div>
-                <button class="clear-button" onclick="clearOutput()">Clear</button>
-            </div>
-        </div>
+<header>
+  <span class="brand">AZIMUTH</span>
+  <span class="room-name" id="roomName"></span>
+  <span class="spacer"></span>
+  <span class="who" id="whoAmI"></span>
+  <button id="btnResync" title="Ask the server for a fresh snapshot">Resync</button>
+  <button id="btnClear">Clear</button>
+  <span class="conn" id="conn">connecting</span>
+</header>
 
-        <div class="output-container">
-            <div id="output"></div>
-        </div>
+<main>
+  <div id="log-wrap"><div id="log"></div></div>
+  <aside id="panel">
+    <section><h2>Exits</h2><ul id="secExits"></ul></section>
+    <section><h2>In room</h2><ul id="secThings"></ul></section>
+    <section><h2>Carrying</h2><ul id="secInventory"></ul></section>
+    <section><h2>Players</h2><ul id="secPlayers"></ul></section>
+  </aside>
+</main>
 
-        <div class="input-container">
-            <textarea id="commandInput" placeholder="Enter command... (Shift+Enter for new line)" autocomplete="off" rows="1"></textarea>
-            <button class="send-button" onclick="sendCommand()">Send</button>
-        </div>
+<form id="inputRow" autocomplete="off">
+  <input id="cmd" placeholder="login &lt;user&gt; &lt;password&gt;   -   or type a command" autocomplete="off" spellcheck="false">
+  <button type="submit">Send</button>
+</form>
+<div class="hint">Click a name to look/go &middot; <b>&#9662;</b> or right-click for every action &middot; Tab completes &middot; Up/Down for history</div>
 
-        <div class="help-text">
-            Press Enter to send commands, Shift+Enter for new lines. Try 'help' for available commands, or 'login &lt;username&gt; &lt;password&gt;' to log in.
-        </div>
-    </div>
+<div id="menu" hidden></div>
 
-    <script>
-        let socket;
-        let connected = false;
-        let commandHistory = [];
-        let historyIndex = -1;
+<script>
+(function () {
+"use strict";
+/* Azimuth web client.
+ *
+ * Speaks the out-of-band state protocol (OOB-PROTOCOL.md): it announces
+ * capability with a `data` hello, keeps a structured model from the `state`
+ * events the server pushes, and renders the side panel from that model rather
+ * than by scraping the text stream.  Every name in the panel is clickable,
+ * and the actions come from the object's own `verbs` table -- which is the
+ * server's *effective* command table for this player -- so a menu can never
+ * offer something dispatch would reject, and never reveals a verb the player
+ * could not already use.
+ */
 
-        function init() {
-            // Connect to the SocketIO server
-            socket = io();
+var GAP = "\u0000";   // marks an argument slot the client cannot fill in
 
-            // Connection event handlers
-            socket.on('connect', function() {
-                connected = true;
-                updateConnectionStatus();
-                appendMessage('Connected to server', 'system');
-            });
+/* ------------------------------------------------------------------ model */
 
-            socket.on('disconnect', function() {
-                connected = false;
-                updateConnectionStatus();
-                appendMessage('Disconnected from server', 'error');
-            });
+var model = {
+  self: null, room: null, inventory: [], players: [],
+  things: {},          // id -> thing summary (room, exits, inventory, contents)
+  seq: 0,
+  live: false,         // has the OOB channel delivered anything yet?
 
-            socket.on('connect_error', function(error) {
-                appendMessage('Connection error: ' + error, 'error');
-            });
+  reset: function () {
+    this.self = null; this.room = null; this.inventory = []; this.players = [];
+    this.things = {}; this.seq = 0; this.live = false;
+  },
 
-            // Game message handler
-            socket.on('message', function(data) {
-                appendMessage(data);
-            });
+  apply: function (payload) {
+    if ("self" in payload) this.self = payload.self;
+    if ("room" in payload) this.room = payload.room;
+    if ("inventory" in payload) this.inventory = payload.inventory || [];
+    if ("players" in payload) this.players = payload.players || [];
+    this.live = true;
+    this.reindex();
+  },
 
-            // Set up input handling
-            const input = document.getElementById('commandInput');
-            input.addEventListener('keydown', function(event) {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                    event.preventDefault();
-                    sendCommand();
-                } else if (event.key === 'ArrowUp' && !event.shiftKey) {
-                    event.preventDefault();
-                    navigateHistory('up');
-                } else if (event.key === 'ArrowDown' && !event.shiftKey) {
-                    event.preventDefault();
-                    navigateHistory('down');
-                }
-            });
+  reindex: function () {
+    var self = this;
+    this.things = {};
+    var add = function (t) {
+      if (!t || !t.id) return;
+      self.things[t.id] = t;
+      (t.contents || []).forEach(add);
+    };
+    if (this.room) {
+      (this.room.things || []).forEach(add);
+      (this.room.exits || []).forEach(add);
+    }
+    this.inventory.forEach(add);
+  },
 
-            // Auto-resize textarea based on content
-            input.addEventListener('input', function() {
-                this.style.height = 'auto';
-                this.style.height = Math.min(this.scrollHeight, 150) + 'px';
-            });
+  objectPool: function () {
+    var pool = [];
+    var add = function (t) {
+      if (!t) return;
+      [t.name].concat(t.aliases || []).forEach(function (n) {
+        if (n && pool.indexOf(n) === -1) pool.push(n);
+      });
+      (t.contents || []).forEach(add);
+    };
+    if (this.room) {
+      (this.room.things || []).forEach(add);
+      (this.room.exits || []).forEach(add);
+    }
+    this.inventory.forEach(add);
+    ["me", "here"].forEach(function (n) { if (pool.indexOf(n) === -1) pool.push(n); });
+    return pool;
+  },
 
-            // Focus the input field
-            input.focus();
-        }
+  playerPool: function () {
+    var pool = [];
+    this.players.forEach(function (p) {
+      if (p.name && pool.indexOf(p.name) === -1) pool.push(p.name);
+    });
+    if (this.room) {
+      (this.room.things || []).forEach(function (t) {
+        if (t.cls === "Player" && t.name && pool.indexOf(t.name) === -1) pool.push(t.name);
+      });
+    }
+    if (pool.indexOf("me") === -1) pool.push("me");
+    return pool;
+  },
 
-        function updateConnectionStatus() {
-            const statusElement = document.getElementById('connectionStatus');
-            if (connected) {
-                statusElement.textContent = 'Connected';
-                statusElement.classList.add('connected');
-            } else {
-                statusElement.textContent = 'Disconnected';
-                statusElement.classList.remove('connected');
-            }
-        }
+  verbPool: function () {
+    var pool = [];
+    var verbs = (this.self && this.self.verbs) || [];
+    verbs.forEach(function (e) {
+      (e.verb || []).forEach(function (v) { if (pool.indexOf(v) === -1) pool.push(v); });
+    });
+    return pool;
+  }
+};
 
-        function appendMessage(message, type = 'normal') {
-            const output = document.getElementById('output');
-            const messageElement = document.createElement('div');
-            messageElement.className = 'message' + (type !== 'normal' ? ' ' + type : '');
-            
-            const timestamp = new Date().toLocaleTimeString();
-            const timestampSpan = document.createElement('span');
-            timestampSpan.className = 'timestamp';
-            timestampSpan.textContent = '[' + timestamp + '] ';
-            
-            messageElement.appendChild(timestampSpan);
-            messageElement.appendChild(document.createTextNode(message));
-            
-            output.appendChild(messageElement);
-            output.scrollTop = output.scrollHeight;
-        }
+/* ------------------------------------------------- verbs -> command lines */
+/* Ported from the TUI client's verb menu, so both clients build the same
+ * command for the same object. */
 
-        function sendCommand() {
-            const input = document.getElementById('commandInput');
-            const command = input.value.trim();
-            
-            if (!command) return;
-            
-            if (!connected) {
-                appendMessage('Not connected to server', 'error');
-                return;
-            }
+function primaryVerb(verbs) {
+  var best = "";
+  (verbs || []).forEach(function (v) { if (v.length > best.length) best = v; });
+  return best;
+}
 
-            // Add to history
-            commandHistory.unshift(command);
-            if (commandHistory.length > 50) {
-                commandHistory.pop();
-            }
-            historyIndex = -1;
+function verbObjectPool(entry, thing) {
+  // `take <x> from <self>` completes against what is inside the thing.
+  var preps = entry.prep || [];
+  var allFrom = preps.length > 0 && preps.every(function (p) { return p === "from"; });
+  if (entry.iobj === "self" && allFrom) {
+    var pool = [];
+    (thing.contents || []).forEach(function (c) {
+      [c.name].concat(c.aliases || []).forEach(function (n) {
+        if (n && pool.indexOf(n) === -1) pool.push(n);
+      });
+    });
+    if (pool.length) return pool;
+  }
+  return model.objectPool();
+}
 
-            // Display the command
-            appendMessage('> ' + command, 'info');
-            
-            // Send to server
-            socket.emit('command', command);
-            
-            // Clear input
-            input.value = '';
-        }
+function verbSlot(role, entry, thing) {
+  if (role === "self") {
+    var n = thing.name || "self";
+    return [n, n];
+  }
+  if (role === "any") return ["<text>", GAP];
+  var pool = role === "Player" ? model.playerPool() : verbObjectPool(entry, thing);
+  if (pool.length === 1) return [pool[0], pool[0]];
+  return ["<" + role.toLowerCase() + ">", GAP];
+}
 
-        function navigateHistory(direction) {
-            const input = document.getElementById('commandInput');
-            
-            if (direction === 'up') {
-                if (historyIndex < commandHistory.length - 1) {
-                    historyIndex++;
-                    input.value = commandHistory[historyIndex];
-                }
-            } else if (direction === 'down') {
-                if (historyIndex > 0) {
-                    historyIndex--;
-                    input.value = commandHistory[historyIndex];
-                } else if (historyIndex === 0) {
-                    historyIndex = -1;
-                    input.value = '';
-                }
-            }
-        }
+function verbRows(thing) {
+  var rows = [], seen = {};
+  (thing.verbs || []).forEach(function (e) {
+    var verb = primaryVerb(e.verb);
+    if (!verb) return;
+    var preps = e.prep || [];
+    var lab = [verb], ins = [verb], slot;
+    if (e.dobj) {
+      slot = verbSlot(e.dobj, e, thing);
+      lab.push(slot[0]); ins.push(slot[1]);
+    }
+    if (preps.length && e.iobj !== null && e.iobj !== undefined) {
+      lab.push(preps[0]); ins.push(preps[0]);
+      slot = verbSlot(e.iobj, e, thing);
+      lab.push(slot[0]); ins.push(slot[1]);
+    }
+    var label = lab.filter(Boolean).join(" ");
+    if (seen[label]) return;
+    seen[label] = true;
+    var text = ins.join(" ");
+    rows.push({
+      label: label,
+      text: text,
+      complete: text.indexOf(GAP) === -1,
+      // The plainest shape: "<verb> <thing>", no preposition.  A verb is
+      // often registered in several shapes ("walk west" and "walk through
+      // west"), and the default click has to land on the same one every time.
+      simple: preps.length === 0 && e.dobj === "self",
+      verbs: e.verb || []
+    });
+  });
+  // Rows that can run as-is first, then the ones still needing an argument.
+  rows.sort(function (a, b) {
+    if (a.complete !== b.complete) return a.complete ? -1 : 1;
+    return a.label.localeCompare(b.label);
+  });
+  return rows;
+}
 
-        function clearOutput() {
-            document.getElementById('output').innerHTML = '';
-        }
+/* What a plain click does: travel for an exit, look at anything else -- both
+ * harmless, and the two things you do constantly. */
+function defaultRow(thing, kind) {
+  var rows = verbRows(thing);
+  var prefer = kind === "exit" ? ["go", "walk"] : ["look", "l"];
+  var wanted = function (r) {
+    return r.complete && r.verbs.some(function (v) { return prefer.indexOf(v) !== -1; });
+  };
+  // Plainest matching shape first, then any matching shape, then anything
+  // runnable.  Without the first pass the winner depends on where the thing's
+  // name sorts ("walk west" vs "walk through west"), which made the same
+  // click send different commands for different exits.
+  return rows.find(function (r) { return wanted(r) && r.simple; })
+      || rows.find(wanted)
+      || rows.find(function (r) { return r.complete; })
+      || null;
+}
 
-        // Initialize when page loads
-        window.addEventListener('load', init);
-    </script>
+/* --------------------------------------------------------------- rendering */
+
+function el(tag, cls, text) {
+  var n = document.createElement(tag);
+  if (cls) n.className = cls;
+  // textContent, never innerHTML: names and messages are world data.
+  if (text !== null && text !== undefined) n.textContent = text;
+  return n;
+}
+
+function thingItem(thing, kind) {
+  var li = el("li");
+  var row = el("div", "row");
+
+  var chip = el("button", "chip");
+  chip.type = "button";
+  chip.appendChild(el("span", "nm", thing.name || "?"));
+  (thing.state || []).forEach(function (s) {
+    chip.appendChild(el("span", "badge " + s, s));
+  });
+
+  var def = defaultRow(thing, kind);
+  chip.title = def ? def.label : "no actions available";
+  chip.addEventListener("click", function () {
+    if (def) send(def.text); else openMenu(thing, chip);
+  });
+
+  var more = el("button", "more", "▾");
+  more.type = "button";
+  more.title = "all actions";
+  more.addEventListener("click", function (ev) {
+    ev.stopPropagation();
+    openMenu(thing, more);
+  });
+
+  [chip, more].forEach(function (target) {
+    target.addEventListener("contextmenu", function (ev) {
+      ev.preventDefault();
+      openMenu(thing, target);
+    });
+  });
+
+  row.appendChild(chip);
+  row.appendChild(more);
+  li.appendChild(row);
+
+  // `contents` is present only when the server decided this player may see
+  // inside (an open container, a worn garment), so rendering it is safe.
+  if ((thing.contents || []).length) {
+    var sub = el("ul");
+    thing.contents.forEach(function (c) { sub.appendChild(thingItem(c, "thing")); });
+    li.appendChild(sub);
+  }
+  return li;
+}
+
+function fillSection(ul, items, kind, emptyText) {
+  ul.replaceChildren();
+  if (!items || !items.length) {
+    ul.appendChild(el("li", "empty", emptyText));
+    return;
+  }
+  items.forEach(function (t) { ul.appendChild(thingItem(t, kind)); });
+}
+
+function ago(seconds) {
+  var d = Math.max(0, Math.floor(Date.now() / 1000) - (seconds || 0));
+  if (d < 60) return d + "s";
+  if (d < 3600) return Math.floor(d / 60) + "m";
+  return Math.floor(d / 3600) + "h";
+}
+
+function renderPlayers() {
+  var ul = document.getElementById("secPlayers");
+  ul.replaceChildren();
+  if (!model.players.length) {
+    ul.appendChild(el("li", "empty", "nobody"));
+    return;
+  }
+  model.players.forEach(function (p) {
+    var li = el("li");
+    var d = el("div", "player" + (p.self ? " self" : ""));
+    d.appendChild(el("span", "nm", p.name || "?"));
+    d.appendChild(el("span", "loc", p.loc || "-"));
+    d.appendChild(el("span", "ago", ago(p.seen)));
+    li.appendChild(d);
+    ul.appendChild(li);
+  });
+}
+
+function render() {
+  document.getElementById("roomName").textContent = (model.room && model.room.name) || "";
+  document.getElementById("whoAmI").textContent = (model.self && model.self.name) || "";
+  var room = model.room || {};
+  fillSection(document.getElementById("secExits"), room.exits, "exit", "none");
+  fillSection(document.getElementById("secThings"), room.things, "thing", "nothing here");
+  fillSection(document.getElementById("secInventory"), model.inventory, "thing", "empty-handed");
+  renderPlayers();
+}
+
+// `seen` is rendered from the timestamp locally, so ages stay fresh without
+// the server re-pushing the roster (OOB-PROTOCOL.md 4.3).
+setInterval(function () { if (model.players.length) renderPlayers(); }, 1000);
+
+/* -------------------------------------------------------------- verb menu */
+
+var menu = document.getElementById("menu");
+var menuOpen = false;
+
+function closeMenu() {
+  menu.hidden = true;
+  menu.replaceChildren();
+  menuOpen = false;
+}
+
+function openMenu(thing, anchor) {
+  menu.replaceChildren();
+  menu.appendChild(el("div", "title", thing.name || "?"));
+  var rows = verbRows(thing);
+  if (!rows.length) menu.appendChild(el("div", "none", "nothing you can do to this"));
+
+  rows.forEach(function (r) {
+    var b = el("button");
+    b.type = "button";
+    if (r.complete) {
+      b.textContent = r.label;
+    } else {
+      // Show which part still has to be typed.
+      r.label.split(/(<[^>]+>)/).forEach(function (p) {
+        if (!p) return;
+        b.appendChild(p.charAt(0) === "<" ? el("span", "gap", p) : document.createTextNode(p));
+      });
+    }
+    b.addEventListener("click", function () {
+      closeMenu();
+      if (r.complete) send(r.text); else stage(r.text);
+    });
+    menu.appendChild(b);
+  });
+
+  menu.hidden = false;
+  menuOpen = true;
+
+  var box = anchor.getBoundingClientRect();
+  var mw = menu.offsetWidth, mh = menu.offsetHeight;
+  var left = Math.max(8, Math.min(box.left, window.innerWidth - mw - 8));
+  var top = box.bottom + 4;
+  if (top + mh > window.innerHeight - 8) top = Math.max(8, box.top - mh - 4);
+  menu.style.left = left + "px";
+  menu.style.top = top + "px";
+  var first = menu.querySelector("button");
+  if (first) first.focus();
+}
+
+document.addEventListener("click", function (ev) {
+  if (menuOpen && !menu.contains(ev.target)) closeMenu();
+}, true);
+
+document.addEventListener("keydown", function (ev) {
+  if (ev.key === "Escape" && menuOpen) { closeMenu(); input.focus(); }
+});
+
+/* Put a partial command in the input with the cursor where the argument goes,
+ * rather than sending something the server would only reject. */
+function stage(text) {
+  var at = text.indexOf(GAP);
+  input.value = text.split(GAP).join("");
+  input.focus();
+  if (at >= 0) input.setSelectionRange(at, at);
+}
+
+/* ------------------------------------------------------------------- log */
+
+var log = document.getElementById("log");
+
+function write(text, cls) {
+  var atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 40;
+  var line = el("div", "line" + (cls ? " " + cls : ""));
+  line.appendChild(el("span", "ts", "[" + new Date().toLocaleTimeString() + "] "));
+  line.appendChild(document.createTextNode(String(text)));
+  log.appendChild(line);
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+
+/* ---------------------------------------------------------------- socket */
+
+var socket = null;
+var connected = false;
+var input = document.getElementById("cmd");
+var cmdHistory = [];
+var historyAt = -1;
+
+function setConn(state, detail) {
+  var n = document.getElementById("conn");
+  n.textContent = detail ? state + " · " + detail : state;
+  n.classList.toggle("up", state === "connected");
+}
+
+function send(command) {
+  command = (command || "").trim();
+  if (!command) return;
+  if (!connected) { write("Not connected.", "err"); return; }
+  cmdHistory.unshift(command);
+  if (cmdHistory.length > 100) cmdHistory.pop();
+  historyAt = -1;
+  write("> " + command, "echo");
+  socket.emit("command", command);
+  input.value = "";
+}
+
+function onState(payload) {
+  if (typeof payload === "string") {
+    try { payload = JSON.parse(payload); } catch (e) { return; }
+  }
+  if (!payload || payload.v !== 1) return;   // unknown protocol version
+
+  // A gap means an event went missing; ask for a fresh snapshot rather than
+  // render a half-applied world (OOB-PROTOCOL.md 8).
+  var seq = payload.seq;
+  if (typeof seq === "number") {
+    var gap = payload.kind !== "init" && model.seq && seq > model.seq + 1;
+    model.seq = seq;
+    if (gap) {
+      socket.emit("data", { op: "resync" });
+      write("(state gap - resyncing)", "sys");
+    }
+  }
+
+  var first = !model.live;
+  model.apply(payload);
+  render();
+  if (first) write("(world model live - click anything in the panel to act)", "sys");
+}
+
+function init() {
+  socket = io();
+
+  socket.on("connect", function () {
+    connected = true;
+    var engine = socket.io.engine;
+    setConn("connected", engine && engine.transport ? engine.transport.name : "");
+    if (engine) {
+      engine.on("upgrade", function () { setConn("connected", engine.transport.name); });
+    }
+    // Nothing from a previous session survives a reconnect.
+    model.reset();
+    render();
+    // Announce out-of-band capability; the server pushes `state` from login
+    // onwards (OOB-PROTOCOL.md 4.2).
+    socket.emit("data", { op: "hello", v: 1 });
+  });
+
+  socket.on("disconnect", function () {
+    connected = false;
+    setConn("disconnected");
+    model.reset();
+    render();
+    write("Disconnected from server.", "err");
+  });
+
+  socket.on("connect_error", function (e) {
+    setConn("disconnected");
+    write("Connection error: " + (e && e.message ? e.message : e), "err");
+  });
+
+  socket.on("message", function (data) {
+    if (data && typeof data === "object") {
+      data = data.message || data.text || JSON.stringify(data);
+    }
+    write(data);
+  });
+
+  socket.on("state", onState);
+}
+
+/* ---------------------------------------------------------------- input */
+
+document.getElementById("inputRow").addEventListener("submit", function (ev) {
+  ev.preventDefault();
+  send(input.value);
+});
+
+input.addEventListener("keydown", function (ev) {
+  if (ev.key === "ArrowUp") {
+    ev.preventDefault();
+    if (historyAt < cmdHistory.length - 1) input.value = cmdHistory[++historyAt];
+  } else if (ev.key === "ArrowDown") {
+    ev.preventDefault();
+    if (historyAt > 0) input.value = cmdHistory[--historyAt];
+    else { historyAt = -1; input.value = ""; }
+  } else if (ev.key === "Tab") {
+    ev.preventDefault();
+    complete();
+  }
+});
+
+/* Tab completion off the model: the first word against the verbs the server
+ * says this player has, later words against everything referenceable. */
+function complete() {
+  var value = input.value;
+  var caret = input.selectionStart;
+  var upto = value.slice(0, caret);
+  var words = upto.split(/\s+/);
+  var partial = words[words.length - 1] || "";
+  var pool = words.length <= 1 ? model.verbPool() : model.objectPool();
+  var hits = pool.filter(function (c) {
+    return c.toLowerCase().indexOf(partial.toLowerCase()) === 0;
+  });
+  if (!hits.length) return;
+
+  var insert;
+  if (hits.length === 1) {
+    insert = hits[0] + " ";
+  } else {
+    // Extend as far as the choices agree, and list them.
+    var prefix = hits[0];
+    hits.forEach(function (h) {
+      while (prefix && h.toLowerCase().indexOf(prefix.toLowerCase()) !== 0) {
+        prefix = prefix.slice(0, -1);
+      }
+    });
+    write(hits.join("   "), "sys");
+    if (prefix.length <= partial.length) return;
+    insert = prefix;
+  }
+  var head = upto.slice(0, upto.length - partial.length);
+  var tail = value.slice(caret);
+  input.value = head + insert + tail;
+  var pos = (head + insert).length;
+  input.setSelectionRange(pos, pos);
+}
+
+document.getElementById("btnClear").addEventListener("click", function () {
+  log.replaceChildren();
+});
+
+document.getElementById("btnResync").addEventListener("click", function () {
+  if (!connected) return;
+  socket.emit("data", { op: "resync" });
+  write("(resync requested)", "sys");
+});
+
+window.addEventListener("load", function () {
+  render();
+  init();
+  input.focus();
+});
+}());
+</script>
 </body>
 </html>

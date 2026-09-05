@@ -40,7 +40,7 @@ before making non-trivial changes.
 | AI agents | [azimuth/agents/](azimuth/agents/) | LLM room builder (in-process) |
 | Text client | [client.py](client.py) | Socket.IO + prompt_toolkit terminal client |
 | TUI client | [tui_client.py](tui_client.py) | Textual terminal client (status bar, live room panel, completion) |
-| Web client | [azimuth/templates/index.html](azimuth/templates/index.html) | Browser terminal at `/` |
+| Web client | [azimuth/templates/index.html](azimuth/templates/index.html) | Browser client at `/`: OOB side panel, click-to-act, Tab completion |
 
 **Server.** FastAPI wrapped in a `socketio.ASGIApp`, served with uvicorn. It exposes
 three surfaces:
@@ -118,7 +118,7 @@ Then connect with either client:
 .venv/bin/python tui_client.py  # TUI client (richer UI)
 ```
 
-or open <http://localhost:5001/> for the browser terminal.
+or open <http://localhost:5001/> for the browser client.
 
 The TUI client takes an optional server URL argument
 (`.venv/bin/python tui_client.py http://mud.example:5001`) or the

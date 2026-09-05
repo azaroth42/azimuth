@@ -48,7 +48,7 @@ as a "vibe coding" experiment and grown into a working engine with an AI layer:
 | `azimuth/classfactory.py` | base + mixins → class (`CANON` names, normalization, `type()` synthesis, eager build at init); stored-verb compilation |
 | `azimuth/persistence.py` | `Storage` ABC, `SimpleFileStorage` (default), `SqliteStorage`, `MlStorage` (MarkLogic) |
 | `azimuth/agents/` | `RoomBuilderAgent` (in-process LLM world-builder), `config.py` (env-driven config + system prompts) |
-| `azimuth/templates/index.html` | Browser terminal client (socket.io from CDN) |
+| `azimuth/templates/index.html` | Browser client (socket.io from CDN): speaks the OOB protocol, renders a live side panel, every name clickable |
 | `client.py` | Text client (python-socketio + prompt_toolkit) |
 | `run.py` | Server entry: uvicorn on `0.0.0.0:5001`, `--reload` |
 | `run-repl.py` | In-process world + agent seed — **no `__main__` block (stub)** |
@@ -99,7 +99,13 @@ FastAPI wrapped in `socketio.ASGIApp`, served by uvicorn:
    `state` events (room/inventory/players sections + verb summaries) —
    dirty-marked in the world, coalesced, and flushed at the end of each
    `command` handler. Old clients that never hello get none of it.
-2. **Web client** — `GET /` serves the browser terminal (Jinja2).
+2. **Web client** — `GET /` serves the browser client (Jinja2). It is a
+   full OOB client: `hello` on connect, a `WorldModel` kept from `state`
+   events, a side panel (exits / room / carrying / players) rendered from
+   that model, and a verb menu on every name built from the object's own
+   `verbs` table. Clicking sends a command on the normal `command` channel —
+   the server has no idea a click happened, so nothing about dispatch or
+   authority moves to the client.
 3. **REST** — `GET /data/{id}` and `GET /search/{name}` (world inspection).
 4. **MCP — currently disabled**: the `FastApiMCP(...)` + `mcp.mount()` lines are
    commented out in `main.py`. Re-enabling is two uncomments. Historical note:

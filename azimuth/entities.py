@@ -60,15 +60,20 @@ class BaseThing:
         return f"<{self.__class__.__name__}: {self.name} ({self.id})>"
 
     def to_dict(self):
-        """Dictionary for persistence: the base fields merged with the fields
-        each state mixin contributes.  The mixins are consulted directly
-        (unbound calls, exactly as ``state_summary`` does) because the diamond
-        MROs would otherwise let BaseThing shadow their ``to_dict`` overrides
-        -- which silently dropped open/locked/held/worn/positioned state on
-        every save.  Each mixin's ``to_dict`` returns its own fields only."""
+        """Base fields for persistence.  This is the *end* of a cooperative
+        chain: every mixin and subclass overrides ``to_dict`` as
+        ``data = super().to_dict(); data.update(...)``, and mixins precede the
+        entity bases in the MRO, so each contributes its own fields on the way
+        down.  (This used to consult a hardcoded mixin tuple with unbound
+        calls, because the old mixins-last MRO let BaseThing shadow them.)"""
+        cls = self.__class__
+        # `cls.__dict__.get`, not attribute access: only the class the factory
+        # actually stamped may claim a combination.  A hand-written subclass of
+        # a stamped class (class BigChest(OpenableContainer)) would otherwise
+        # inherit its ancestor's identity and be persisted *as* that ancestor.
         data = {
             "id": self.id,
-            "class": self.__class__.__name__,
+            "class": cls.__dict__.get("_az_base", cls.__name__),
             "name": self.name,
             "aliases": self.aliases,
             "description": self.description,
@@ -76,9 +81,9 @@ class BaseThing:
             "contents": [x.id for x in self.contents],
             "messages": self._messages,
         }
-        for mixin in (Openable, Lockable, Switchable, Holdable, Wearable, Positionable):
-            if isinstance(self, mixin):
-                data.update(mixin.to_dict(self))
+        mixins = cls.__dict__.get("_az_mixins")
+        if mixins:
+            data["mixins"] = list(mixins)
         return data
 
     def _save(self):
@@ -255,16 +260,11 @@ class BaseThing:
 
     def state_summary(self):
         """Short state strings for the client (open/closed, locked/unlocked,
-        on/off, held/worn).  Mixins are consulted directly (unbound calls)
-        because the diamond MROs would otherwise let BaseThing shadow them.
-        Returns None when the thing has no state."""
-        states = []
-        for mixin in (Openable, Lockable, Switchable, Holdable, Wearable):
-            if isinstance(self, mixin):
-                s = mixin.state_summary(self)
-                if s:
-                    states.extend(s)
-        return states or None
+        on/off, held/worn).  End of a cooperative chain: each mixin returns
+        ``super().state_summary() + [...]``, so a plain thing has none.
+        Callers that need the old "None when empty" form use ``or None``
+        (see thing_summary)."""
+        return []
 
     def verbs_summary(self, who, include_argless=False):
         """This thing's merged command table as JSON-safe entries, restricted
@@ -314,7 +314,7 @@ class BaseThing:
         worn clothing only reveal held/worn items."""
         if who is None or not who.can_see(self):
             return None
-        if isinstance(self, (Player, WearableObject)):
+        if isinstance(self, (Player, Wearable)):
             items = [x for x in self.contents if x.contained_look_at(who)]
         elif hasattr(self, "is_open") and not self.is_open:
             return None
@@ -329,7 +329,7 @@ class BaseThing:
             "name": self.name,
             "aliases": list(self.aliases or []),
             "cls": self.__class__.__name__,
-            "state": self.state_summary(),
+            "state": self.state_summary() or None,
             "verbs": self.verbs_summary(who),
         }
         p = self.find_position()
@@ -555,16 +555,19 @@ class Exit(BaseThing):
         return data
 
 
-class OpenableExit(Exit, Openable):
+class OpenableExit(Openable, Exit):
+    """An Exit you can open and close.  Mixins come *first* in the bases so
+    the mixin's __init__/to_dict/look_at/state_summary sit ahead of BaseThing
+    in the MRO and chain cooperatively -- no explicit Openable.__init__ call,
+    no hand-spliced look_at.  Only the genuinely Exit-specific behaviour below
+    (a closed door blocks travel; open/close carry across to the far side)
+    lives here, which is why this class still exists at all."""
+
     default_messages = {
         "go_fail_closed": "You cannot go through that, it's closed.",
         "open_destination": "{player} opens {self} from the other side.",
         "close_destination": "{player} closes {self} from the other side.",
     }
-
-    def __init__(self, id, world, data, recursive=True):
-        super().__init__(id, world, data, recursive)
-        Openable.__init__(self, id, world, data, recursive)
 
     @make_command(["go", "walk"], "self")
     @make_command(["go", "walk"], None, ["through"], "self")
@@ -577,32 +580,22 @@ class OpenableExit(Exit, Openable):
     @make_command("open", "self")
     def open(self, player, prep=None, verb=None):
         super().open(player)
-        if self.open and self.destination:
+        # `self.is_open`, not `self.open` -- the latter is this very method and
+        # is always truthy, so both branches used to announce unconditionally.
+        if self.is_open and self.destination:
             self.destination.announce(self.get_message("open_destination", player))
 
     @make_command("close", "self")
     def close(self, player, prep=None, verb=None):
         super().close(player)
-        if self.open and self.destination:
+        if not self.is_open and self.destination:
             self.destination.announce(self.get_message("close_destination", player))
 
-    def look_at(self, who):
-        # Make contents visible if open
-        # super() will call on the object hierarchy
-        desc = super().look_at(who)
-        # Now call the mixins independently
-        d2 = Openable.look_at(self, who)
-        return "\n".join([desc, d2])
 
-
-# Need the overrides for open/close for exits
-class LockableExit(OpenableExit, Lockable):
-    def __init__(self, id, world, data, recursive=True):
-        super().__init__(id, world, data, recursive)
-        # super() only chains OpenableExit -> Exit; Lockable's own __init__
-        # (is_locked, locked_by_*, ...) is never called through the diamond,
-        # so invoke it explicitly -- same pattern as OpenableContainer.
-        Lockable.__init__(self, id, world, data, recursive)
+class LockableExit(Lockable, OpenableExit):
+    """MRO: LockableExit -> Lockable -> OpenableExit -> Openable -> StateToggle
+    -> Exit -> BaseThing.  `open` therefore runs the lock check, then the
+    far-side announcement, then the toggle -- each layer calling super()."""
 
 
 # --- Object Class ---
@@ -708,91 +701,36 @@ class Object(BaseThing):
 
 
 # --- Container Class ---
-class Container(Object, Containable):
-    """Represents an object that can hold other objects."""
-
-    def look_at(self, who):
-        # Make contents visible if open
-        # super() will call on the object hierarchy
-        desc = super().look_at(who)
-        # Now call the mixins independently
-        d2 = Containable.look_at(self, who)
-        return "\n".join([desc, d2])
+class Container(Containable, Object):
+    """An object that can hold other objects.  Pure composition -- the body is
+    empty because Containable now chains through the MRO on its own."""
 
 
-class OpenableContainer(Container, Openable):
-    def __init__(self, id, world, data, recursive=False):
-        super().__init__(id, world, data, recursive)
-        Openable.__init__(self, id, world, data, recursive)
+class OpenableContainer(Openable, Container):
+    """A container with a lid.  Also pure composition."""
 
 
-class PositionableObject(Object, Positionable):
-    """Represents a furniture (or similar) object relative to which players and objects can
-    be positioned (sit on a chair, lie under a table, put a plate on it...)."""
-
-    def __init__(self, id, world, data, recursive=False):
-        super().__init__(id, world, data, recursive)
-        # super() only chains Object -> BaseThing; Positionable's own __init__
-        # (self.positioned, ...) is never reached through the diamond, so call
-        # it explicitly -- same pattern as OpenableContainer / HeldObject.
-        Positionable.__init__(self, id, world, data, recursive)
-
-    def look_at(self, who):
-        desc = super().look_at(who)
-        d2 = Positionable.look_at(self, who)
-        if d2:
-            desc += f"\n{d2}"
-        return desc
+class PositionableObject(Positionable, Object):
+    """Furniture (or similar) relative to which players and objects can be
+    positioned (sit on a chair, lie under a table, put a plate on it...).
+    Only the "you cannot pick up the furniture" rule is specific to the
+    combination; the rest is inherited composition."""
 
     def take_ok(self, player):
         return False
 
 
-class WearableObject(Object, Containable, Wearable):
-    """Represents a clothing object that can be worn, with pockets."""
-
-    def __init__(self, id, world, data, recursive=False):
-        super().__init__(id, world, data, recursive)
-        Wearable.__init__(self, id, world, data, recursive)
-
-    def look_at(self, who):
-        """If wearing the clothing, then show its contents."""
-        desc = super().look_at(who)
-        # Now call the mixins independently
-        d2 = Wearable.contained_look_at(self, who)
-        if d2:
-            desc += f"\n{d2}"
-        return desc
-
-    def contained_look_at(self, who):
-        return Wearable.contained_look_at(self, who)
+class WearableObject(Wearable, Containable, Object):
+    """A clothing object that can be worn, with pockets."""
 
 
-class HeldObject(Object, Holdable):
-    def __init__(self, id, world, data, recursive=False):
-        super().__init__(id, world, data, recursive)
-        Holdable.__init__(self, id, world, data, recursive)
-
-    def contained_look_at(self, who=None):
-        return Holdable.contained_look_at(self, who)
+class HeldObject(Holdable, Object):
+    """An object that can be wielded."""
 
 
 # --- Switchable Class ---
-class SwitchableObject(Object, Switchable):
+class SwitchableObject(Switchable, Object):
     """A lamp (or other light/electronic) that can be turned on and off."""
-
-    def __init__(self, id, world, data, recursive=False):
-        super().__init__(id, world, data, recursive)
-        # super() only chains Object -> BaseThing; call Switchable.__init__
-        # explicitly so is_on / on_paired_object are set (see PositionableObject).
-        Switchable.__init__(self, id, world, data, recursive)
-
-    def look_at(self, who):
-        desc = super().look_at(who)
-        d2 = Switchable.look_at(self, who)
-        if d2:
-            desc += f"\n{d2}"
-        return desc
 
 
 # --- Edible Class ---
@@ -1168,28 +1106,253 @@ class Programmer(Player):
                 self.world.mark_room_dirty(place)
             player.tell(f"You dig {exits} to {room} ({place}).")
 
+    def _recompose(self, player, what, describe, **kwargs):
+        """Shared body of @chparent / @addmixin / @rmmixin: find the object,
+        work out its new (class, mixins), and rebuild the instance under it.
+
+        `kwargs` is passed to World.classes.combine (add=/remove=), except for
+        `base`, which replaces the entity base outright."""
+        target = player.my_match_object(what)
+        if target is None:
+            player.tell(f"You can't see anything matching {what}")
+            return None
+        data = target.to_dict()
+        base = kwargs.pop("base", None) or data["class"]
+        try:
+            mixins = self.world.classes.combine(data.get("mixins"), **kwargs)
+            data["class"] = base
+            data["mixins"] = list(mixins)
+            # Resolve before writing anything: an unknown base or a bad
+            # combination must fail with a message, not a half-saved object.
+            cls = self.world.classes.resolve(base, mixins)
+        except Exception as e:
+            player.tell(f"Cannot do that to {target.name}: {e}")
+            return None
+        target = self.world.rebuild_instance(target, data)
+        player.tell(f"{target.name} is now {describe} ({cls.__name__}).")
+        return target
+
     @make_command("@chparent", "any", "to", "any")
     def change_parent(self, player, what, new_class, prep=None, verb=None):
+        """@chparent <thing> to <Class> -- swap the entity base.
+
+        A hand-written composite name (Container, OpenableExit, ...) is
+        expanded into the base + mixins it stands for, so @chparent and
+        @addmixin cannot disagree about what a thing is."""
         if not what:
             player.tell("You need to specify an object.")
-        elif not new_class:
+            return
+        if not new_class:
             player.tell("You need to specify a new class.")
-        else:
-            nc = self.world.import_class(new_class)
-            if nc is not None:
-                # get "what" --> object
-                target = player.my_match_object(what)
-                data = target.to_dict()
-                data["class"] = new_class
-                self.world.save(data)
-                wid = target.id
-                del self.world.active_objects[wid]
-                del target
-                target = self.world.load(wid)
-                self.world.mark_thing_changed(target)
-                player.tell(f"You change the parent of {what} to {new_class}.")
+            return
+        (base, mixins) = self.world.classes.split_name(new_class)
+        if self.world.import_class(base) is None:
+            player.tell(f"Could not find class {new_class}")
+            return
+        target = player.my_match_object(what)
+        if target is None:
+            player.tell(f"You can't see anything matching {what}")
+            return
+        data = target.to_dict()
+        # @chparent replaces the whole identity, mixins included.
+        data["mixins"] = []
+        try:
+            cls = self.world.classes.resolve(base, mixins)
+        except Exception as e:
+            player.tell(f"Could not use class {new_class}: {e}")
+            return
+        data["class"] = base
+        data["mixins"] = list(mixins)
+        target = self.world.rebuild_instance(target, data)
+        player.tell(f"You change the parent of {what} to {cls.__name__}.")
+
+    @make_command("@addmixin", "any", "to", "any")
+    def add_mixin(self, player, what, mixin, prep=None, verb=None):
+        """@addmixin <thing> to <Mixin> -- give an existing object a new
+        capability, with no new Python: the class for base + mixins is
+        composed on the spot (or a hand-written one is picked up, if the
+        combination has one)."""
+        if not what or not mixin:
+            player.tell("Usage: @addmixin <thing> to <Mixin>")
+            return
+        self._recompose(player, what, f"also {mixin}", add=[mixin.strip()])
+
+    @make_command("@rmmixin", "any", ["from"], "any")
+    def remove_mixin(self, player, what, mixin, prep=None, verb=None):
+        """@rmmixin <thing> from <Mixin> -- take a capability away again."""
+        if not what or not mixin:
+            player.tell("Usage: @rmmixin <thing> from <Mixin>")
+            return
+        self._recompose(player, what, f"no longer {mixin}", remove=[mixin.strip()])
+
+    # --- stored verbs (see classfactory.py) -------------------------------
+
+    def _verb_target(self, player, cls_name):
+        """The canonical class name to hang a stored verb on, resolving a
+        thing's name as well as a class name so `@verb #chest ...` works."""
+        (base, mixins) = self.world.classes.split_name(cls_name)
+        try:
+            return self.world.classes.resolve(base, mixins).__name__
+        except Exception:
+            pass
+        target = player.my_match_object(cls_name)
+        if target is not None:
+            return target.__class__.__name__
+        return None
+
+    @make_command("@verb", "any")
+    def define_verb(self, player, argstr, prep=None, verb=None):
+        """@verb <Class|thing> <name> [<shape>] <code>
+
+        Store a Python verb in the database and compile it onto the class,
+        with no change to the codebase.  Newlines are written as \n (commands
+        arrive as a single line):
+
+          @verb OpenableExit use go,walk/self def use(self, player, prep=None,
+          verb=None):\n    if not self.is_open:\n        ...
+
+        The shape is `verbs/dobj/prep/iobj` (verbs comma-separated, `-` for an
+        empty slot); omit it and the verb is registered argless under its own
+        name.  Stored code cannot use a bare super() -- there is no closure
+        cell for it -- so call super(cls, self) instead; `cls` is provided.
+        With no code, prints the stored verb instead of replacing it.
+        """
+        # Local import: classfactory imports this module, so it cannot be
+        # imported at module scope here.
+        from .classfactory import compile_verb, now_stamp
+
+        bits = (argstr or "").split(None, 2)
+        if len(bits) < 2:
+            player.tell("Usage: @verb <Class|thing> <name> [<verbs/dobj/prep/iobj>] <code>")
+            return
+        name = self._verb_target(player, bits[0])
+        if name is None:
+            player.tell(f"No such class or object: {bits[0]}")
+            return
+        vname = bits[1]
+        rest = bits[2] if len(bits) > 2 else ""
+
+        stored = self.world.class_verbs.setdefault(name, {}).setdefault("verbs", {})
+        if not rest:
+            spec = stored.get(vname)
+            if spec is None:
+                player.tell(f"{name}.{vname} has no stored verb.")
             else:
-                player.tell(f"Could not find class {new_class}")
+                player.tell(
+                    f"# {name}.{vname} by {spec.get('author')} {spec.get('created')}"
+                )
+                player.tell(spec.get("code", ""))
+            return
+
+        shape = None
+        if rest.split(None, 1)[0].count("/") == 3:
+            (shape_txt, _, rest) = rest.partition(" ")
+            (verbs, dobj, prp, iobj) = shape_txt.split("/")
+            clean = lambda v: None if v in ("", "-") else v  # noqa: E731
+            shape = {
+                "verb": [v for v in verbs.split(",") if v],
+                "dobj": clean(dobj),
+                "prep": [p for p in prp.split(",") if p and p != "-"] or None,
+                "iobj": clean(iobj),
+            }
+        if shape is None:
+            shape = {"verb": [vname], "dobj": None, "prep": None, "iobj": None}
+
+        spec = {
+            "code": rest.replace("\\n", "\n"),
+            "shapes": [shape],
+            "author": self.name,
+            "created": now_stamp(),
+        }
+        previous = stored.get(vname)
+        stored[vname] = spec
+        try:
+            # Compile against the *current* class before committing, so a
+            # syntax error is a message, not a world that no longer loads.
+            cls = self.world.classes.registry.get(name)
+            if cls is not None:
+                compile_verb(cls, vname, spec)
+        except Exception as e:
+            if previous is None:
+                stored.pop(vname, None)
+            else:
+                stored[vname] = previous
+            player.tell(f"Verb not stored: {e}")
+            return
+        self.world.persist_class_verbs()
+        n = self.world.reload_class(name)
+        player.tell(f"Stored {name}.{vname}; rebuilt {n} live object(s).")
+
+    @make_command("@rmverb", "any")
+    def remove_verb(self, player, argstr, prep=None, verb=None):
+        """@rmverb <Class|thing> <name> -- drop a stored verb again."""
+        bits = (argstr or "").split()
+        if len(bits) != 2:
+            player.tell("Usage: @rmverb <Class|thing> <name>")
+            return
+        name = self._verb_target(player, bits[0])
+        stored = (self.world.class_verbs.get(name) or {}).get("verbs") or {}
+        if bits[1] not in stored:
+            player.tell(f"{name}.{bits[1]} has no stored verb.")
+            return
+        del stored[bits[1]]
+        self.world.persist_class_verbs()
+        n = self.world.reload_class(name)
+        player.tell(f"Removed {name}.{bits[1]}; rebuilt {n} live object(s).")
+
+    @make_command("@verbs", "any")
+    @make_command("@verbs")
+    def list_verbs(self, player, argstr=None, prep=None, verb=None):
+        """@verbs [<Class|thing>] -- stored verbs, for one class or all."""
+        if not argstr:
+            any_stored = False
+            for cname, rec in sorted(self.world.class_verbs.items()):
+                vs = (rec or {}).get("verbs") or {}
+                if vs:
+                    any_stored = True
+                    player.tell(f"{cname}: {', '.join(sorted(vs))}")
+            if not any_stored:
+                player.tell("No stored verbs in this world.")
+            return
+        name = self._verb_target(player, argstr.strip())
+        if name is None:
+            player.tell(f"No such class or object: {argstr}")
+            return
+        from .classfactory import verb_shapes
+
+        stored = self.world.classes.stored_verbs(name)
+        if not stored:
+            player.tell(f"{name} has no stored verbs.")
+            return
+        for vname, spec in sorted(stored.items()):
+            shapes = ", ".join(
+                f"{'|'.join(s['verb'])}/{s.get('dobj') or '-'}"
+                f"/{'|'.join(s.get('prep') or []) or '-'}/{s.get('iobj') or '-'}"
+                for s in verb_shapes(spec)
+            )
+            player.tell(f"{name}.{vname} [{shapes}] by {spec.get('author')}")
+
+    @make_command("@mixins", "any")
+    @make_command("@mixins")
+    def show_mixins(self, player, what=None, prep=None, verb=None):
+        """@mixins <thing> -- what a thing is composed of, and what else it
+        could be."""
+        vocab = ", ".join(self.world.classes.mixin_names())
+        if not what:
+            player.tell(f"Available mixins: {vocab}")
+            return
+        target = player.my_match_object(what)
+        if target is None:
+            player.tell(f"You can't see anything matching {what}")
+            return
+        cls = target.__class__
+        mixins = list(cls.__dict__.get("_az_mixins") or [])
+        player.tell(
+            f"{target.name} is {cls.__name__}: base "
+            f"{cls.__dict__.get('_az_base', cls.__name__)}"
+            + (f" + {', '.join(mixins)}" if mixins else " (no mixins)")
+        )
+        player.tell(f"Available mixins: {vocab}")
 
     @make_command("@rename", "any", "to", "any")
     def rename(self, player, what, new_name, prep=None, verb=None):

@@ -17,8 +17,7 @@ import requests
 from typing import Any, Dict, Optional
 from .config import AgentConfig, SYSTEM_PROMPTS
 
-from ..entities import (Place, Exit, OpenableExit, Object, PositionableObject,
-    WearableObject, HeldObject, Container)
+from ..entities import Place
 from ..world import World
 
 
@@ -48,13 +47,18 @@ class RoomBuilderAgent:
         )
         self.test_lm_studio_connection()
 
+        # Names, not class objects: they are resolved through the world's
+        # class factory at use time, so an agent-built object gets the same
+        # composed class (and the same stored verbs) as one loaded from the
+        # database -- and the agent can name a combination that has no
+        # hand-written class at all.
         self.object_class_hash = {
-            "Container": Container,
-            "HeldObject": HeldObject,
-            "WearableObject": WearableObject,
+            "Container": "Container",
+            "HeldObject": "HeldObject",
+            "WearableObject": "WearableObject",
             "Food": None,
-            "PositionableObject": PositionableObject,
-            "Item": Object,
+            "PositionableObject": "PositionableObject",
+            "Item": "Object",
         }
 
         self.world = world
@@ -257,9 +261,10 @@ Short Description: {room.description}
         # Make the exits
         ex_data = {"name": exit_data["dir"], "source": None, "destination": None}
         if "class" in exit_data and exit_data["class"] == "OpenableExit":
-            exit = OpenableExit(None, self.world, ex_data, recursive=False)
+            ex_cls = self.world.compose("OpenableExit")
         else:
-            exit = Exit(None, self.world, ex_data, recursive=False)
+            ex_cls = self.world.compose("Exit")
+        exit = ex_cls(None, self.world, ex_data, recursive=False)
         exit.source = from_room
         exit.destination = to_room
         from_room.add_exit(exit)
@@ -267,7 +272,9 @@ Short Description: {room.description}
 
         # Create the reverse exit
         rev_ex_data = {"name": exit_data["return"], "source": None, "destination": None}
-        rev_exit = Exit(None, self.world, rev_ex_data, recursive=False)
+        rev_exit = self.world.compose("Exit")(
+            None, self.world, rev_ex_data, recursive=False
+        )
         rev_exit.source = to_room
         rev_exit.destination = from_room
         to_room.add_exit(rev_exit)
@@ -285,7 +292,8 @@ Short Description: {room.description}
                 oname = obj_data["name"]
                 oclass = obj_data["class"]
                 onotes = obj_data.get("description", "")
-                ocls = self.object_class_hash.get(oclass, None)
+                cname = self.object_class_hash.get(oclass, None)
+                ocls = self.world.compose(cname) if cname else None
                 if ocls is not None:
                     odata = {"name": oname, "description": onotes}
                     obj = ocls(None, self.world, odata, recursive=False)

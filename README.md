@@ -9,9 +9,14 @@ assisted development, and to update my skills with the latest Python 3 features.
 
 The design goals that fell out of that:
 
-- **Data-driven objects** — every object is a plain JSON dict with a `class` field.
-  Objects are rehydrated dynamically at load time (see `World.import_class`), so an
-  object's class can even be *reassigned at runtime* via `@chparent`.
+- **Data-driven objects** — every object is a plain JSON dict recording an entity
+  *base* and a set of *mixins*. The class for a combination is looked up or
+  **composed at runtime** (see `azimuth/classfactory.py`), so an object's
+  capabilities can be changed from inside the MUD with `@addmixin` / `@rmmixin`,
+  and its class reassigned with `@chparent`.
+- **Verbs in the database** — a combination that needs a dozen lines of Python
+  doesn't need a class in the codebase: `@verb` stores the function source in the
+  world and compiles it onto the class at init.
 - **A MOO-style programmer tier** — a `Programmer` player gets `eval`, `@create`,
   `@dig`, `@message` and friends for building and editing the world from inside the MUD.
 - **AI-native** — an LLM-driven Room Builder agent can generate whole environments
@@ -30,6 +35,7 @@ before making non-trivial changes.
 | World engine | [azimuth/world.py](azimuth/world.py) | Object cache, lazy loading, login, command dispatch |
 | Command system | [azimuth/command_decorator.py](azimuth/command_decorator.py) | `@make_command` registration and resolution |
 | Object model | [azimuth/entities.py](azimuth/entities.py), [azimuth/mixins.py](azimuth/mixins.py) | `Place`/`Exit`/`Object`/`Player` + capability mixins |
+| Class composition | [azimuth/classfactory.py](azimuth/classfactory.py) | base + mixins → class, at runtime; stored verbs |
 | Persistence | [azimuth/persistence.py](azimuth/persistence.py) | file, SQLite, or MarkLogic backends |
 | AI agents | [azimuth/agents/](azimuth/agents/) | LLM room builder (in-process) |
 | Text client | [client.py](client.py) | Socket.IO + prompt_toolkit terminal client |
@@ -67,8 +73,17 @@ system with `{player}`/`{self}`/`{object}` formatting) → `Place` (exits, room
 announcements) → `Exit` (movement, lazy destination) → `Object` (take/drop/use with
 `*_ok`/`*_effect` hooks). Capability mixins implement the usual MUD semantics:
 `Openable`/`Lockable` (state toggles), `Containable`, `Switchable`, `Positionable`,
-`Holdable` (wield), `Wearable` — combined into `Container`, `Clothing`, `Furniture`,
-`HeldObject`, `OpenableExit`, etc.
+`Holdable` (wield), `Wearable`.
+
+**Composition, not a class per combination.** An object stores what it *is* —
+`{"class": "Object", "mixins": ["Containable", "Openable"]}` — and
+[classfactory.py](azimuth/classfactory.py) turns that into a class: a
+hand-written one when the combination has one (`Container`, `OpenableExit`,
+`PositionableObject`, … keep their overrides and their old names), otherwise
+built with `type()`, mixins first so their cooperative `__init__` / `to_dict` /
+`look_at` / `state_summary` chain ahead of `BaseThing`. Combinations in use are
+resolved eagerly at init; anything invented later (`@addmixin`, the agent)
+resolves lazily. A lockable container with pockets needs no new Python.
 
 **Persistence.** `AZIMUTH_DB_TYPE` selects the backend:
 
@@ -165,6 +180,14 @@ exit), `@create <name> as <class>`, `@chparent <obj> to <class>`, `@rename <obj>
 <name>`, `@teleport <place|#id>`, `@desc <obj> as <text>`, `@messages <obj>` /
 `@message <name> on <obj> as "<text>"` (runtime text editing), `@dumpdb`.
 
+Composition and verbs: `@mixins [<obj>]` (what a thing is made of, and the
+vocabulary), `@addmixin <obj> to <Mixin>`, `@rmmixin <obj> from <Mixin>`,
+`@verbs [<Class|obj>]`, `@verb <Class|obj> <name> [<verbs/dobj/prep/iobj>]
+<code>`, `@rmverb <Class|obj> <name>`. Stored verb source is written on one
+line with `\n` for newlines, and calls `super(cls, self)` rather than a bare
+`super()` (there is no closure cell for it). A stored verb is server-process
+code: it is Programmer-tier, and it records its author.
+
 ## AI Room Builder
 
 [azimuth/agents/room_builder.py](azimuth/agents/room_builder.py) runs **in-process**
@@ -176,7 +199,7 @@ OpenAI-compatible chat API in two phases:
    (`dir`/`return`, `Exit` or `OpenableExit`), connected in a regular grid pattern.
    The plan is rendered as an ASCII map for review.
 2. **Describe** — per room, the LLM writes an atmospheric description and up to 5
-   objects (class-restricted: `Container`, `Clothing`, `HeldObject`, `Furniture`,
+   objects (class-restricted: `Container`, `WearableObject`, `HeldObject`, `PositionableObject`,
    `Item`).
 
 The agent then instantiates and saves everything through the normal entity

@@ -12,6 +12,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from azimuth.command_decorator import commands
 
 from . import entities
+from .classfactory import ClassFactory
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -39,6 +40,19 @@ class World:
             "fail_command_match": "I don't understand that.",
         }
         self.socketio = None  # Will be injected by main.py
+
+        # Python source kept in the database and compiled onto composed
+        # classes (see classfactory.py).  Loaded before the factory can
+        # resolve anything, because resolution is what attaches them.
+        self.class_verbs = self.db.load(f"{world_id}_classes") or {}
+        self.class_verbs.pop("id", None)
+        self.class_verbs.pop("class", None)
+
+        # base + mixins -> class, composed at init (see classfactory.py)
+        self.classes = ClassFactory(self)
+        # Teach the storage layer how to evaluate a `clss` filter now that a
+        # stored object records base + mixins rather than a class name.
+        self.db.class_matcher = self.class_matches
 
         # Out-of-band state channel (see OOB-PROTOCOL.md)
         self.oob_sids = set()   # sids that hello'd OOB capability over `data`
@@ -73,6 +87,33 @@ class World:
                 pass
             self.players = players
 
+    def compose(self, class_name):
+        """The composed class for a class name, expanding a hand-written
+        composite name into its base + mixins.  The way code outside
+        make_instance should reach a class, so it picks up this world's
+        stored verbs (see classfactory.ClassFactory.attach_verbs)."""
+        return self.classes.resolve(*self.classes.split_name(class_name))
+
+    def class_matches(self, data, clss):
+        """Does a stored object dict satisfy a `clss` filter?
+
+        Composes the object's class and asks issubclass, so a filter for
+        `Object` matches a Container and a filter for `Container` matches
+        anything stored as Object + Containable, however it was written down.
+        Installed on the storage backend (see Storage.matches_class); the
+        backend's own default is plain name equality.
+        """
+        if clss is None:
+            return True
+        if not data or "class" not in data:
+            return False  # the players file and other class-less documents
+        try:
+            cls = self.classes.resolve_from_data(data)
+        except Exception as e:
+            logger.warning(f"cannot compose class for {data.get('id')}: {e}")
+            return False
+        return cls is not None and issubclass(cls, clss)
+
     def import_class(self, objectType):
         if not objectType:
             return None
@@ -101,6 +142,25 @@ class World:
     def register_active(self, obj):
         self.active_objects[obj.id] = obj
 
+    def persist_class_verbs(self):
+        """Write the stored-verb record back (mirrors persist_players)."""
+        rec = copy.deepcopy(self.class_verbs)
+        rec["id"] = f"{self.id}_classes"
+        self.save(rec)
+
+    def reload_class(self, name):
+        """Forget a composed class and rebuild every live instance of it, so
+        an edited stored verb takes effect without restarting the server.
+        Returns the number of instances rebuilt."""
+        self.classes.registry.pop(name, None)
+        victims = [
+            o for o in list(self.active_objects.values())
+            if type(o).__name__ == name
+        ]
+        for obj in victims:
+            self.rebuild_instance(obj, obj.to_dict())
+        return len(victims)
+
     def persist_players(self):
         # for now write players to JSON file
         players = copy.deepcopy(self.players)
@@ -108,10 +168,11 @@ class World:
         self.save(players)
 
     def make_instance(self, data, recursive=True):
-        if "." not in data["class"]:
-            clss = getattr(entities, data["class"])
-        else:
-            clss = self.import_class(data["class"])
+        # The class comes from the factory, which handles both stored forms:
+        # {"class": base, "mixins": [...]} and a legacy composite name.
+        clss = self.classes.resolve_from_data(data)
+        if clss is None:
+            raise ValueError(f"Unknown class {data['class']!r} for {data.get('id')}")
         id = data["id"]
         instance = clss(id, self, data, recursive)
         self.active_objects[id] = instance
@@ -165,16 +226,81 @@ class World:
         elif id in self.active_objects:
             return self.active_objects[id]
         else:
-            # search active objects for startswith(id)
-            for what in self.active_objects:
-                if what.startswith(id):
-                    return self.active_objects[what]
+            # search active objects for startswith(id).  The class filter has
+            # to apply here too -- this branch used to ignore it, so a #ref
+            # could resolve to an object of the wrong class purely by being in
+            # the cache while the db branch below would have rejected it.
+            for what, obj in self.active_objects.items():
+                if what.startswith(id) and (clss is None or isinstance(obj, clss)):
+                    return obj
         # Persistence layer might be able to search too
         data = self.db.get_object_by_id(id, clss)
         if data:
             return self.make_instance(data)
         else:
             return data
+
+    # Attributes across entities/mixins that hold a direct reference to
+    # another live object.  When an instance is rebuilt under a different
+    # composed class its identity (the id) is unchanged, but every one of
+    # these still points at the dead instance and has to be reseated.
+    BACKREF_ATTRS = (
+        "held_by",
+        "worn_by",
+        "_position_parent",
+        "open_paired_object",
+        "on_paired_object",
+        "lock_paired_object",
+        "locked_by_object",
+        "locked_by_player",
+        "destination",
+        "source",
+        "home",
+        "last_location",
+    )
+
+    def rebuild_instance(self, obj, data):
+        """Replace a live object with a fresh instance of a different composed
+        class, keeping its id and its place in the world graph.
+
+        Backs @chparent / @addmixin / @rmmixin.  The old code for this dropped
+        the instance from active_objects and reloaded it, which left the dead
+        instance sitting in its room's `contents` (the room then listed the
+        thing twice) and left every held_by / paired-object reference pointing
+        at it.  Detaching first and reseating afterwards is what makes the
+        swap safe.
+        """
+        oid = obj.id
+        where = obj.location
+        obj.move_to(None)  # leave the room's contents; drop any position held
+        data["id"] = oid
+        data["location"] = where.id if where else None
+        self.active_objects.pop(oid, None)
+        self.save(data)
+        new = self.load(oid)
+        if new is None:
+            raise ValueError(f"could not rebuild {oid}")
+        self.reseat_references(obj, new)
+        self.mark_thing_changed(new)
+        return new
+
+    def reseat_references(self, old, new):
+        """Point every live reference to *old* at *new* instead."""
+        for other in list(self.active_objects.values()):
+            if other is new:
+                continue
+            for attr in self.BACKREF_ATTRS:
+                if getattr(other, attr, None) is old:
+                    setattr(other, attr, new)
+            for entries in (getattr(other, "positioned", None) or {}).values():
+                for e in entries:
+                    if e[0] is old:
+                        e[0] = new
+            exits = getattr(other, "exits", None)
+            if exits:
+                for k, v in list(exits.items()):
+                    if v is old:
+                        exits[k] = new
 
     def call_async_partial(self, func):
         try:
@@ -612,7 +738,11 @@ def setup_world(db, world_id):
     """Checks if the world exists and creates it if not."""
 
     world = World(db, world_id)
+    # register_commands() first: it resets default_commands on every class that
+    # declares decorated verbs, so the factory (which may attach stored verbs
+    # to a class) has to run after it.
     world.register_commands()
+    world.classes.build_from_database()
     if world.config is not None:
         return world
     else:

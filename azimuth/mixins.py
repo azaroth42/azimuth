@@ -6,6 +6,14 @@
 from azimuth.command_decorator import make_command
 
 
+def join_look(*parts):
+    """Join the fragments a cooperative ``look_at`` chain contributes, dropping
+    the empty ones.  Every mixin below appends its own line to whatever its
+    ``super()`` produced, so a synthesized class composes its description with
+    no per-combination glue (see ARCHITECTURE.md 6.2)."""
+    return "\n".join([p for p in parts if p])
+
+
 class StateToggle:
     # Can we abstract open, locked, etc as state toggles
 
@@ -65,7 +73,17 @@ class Openable(StateToggle):
         "toggle_open_on_others": "{player} opens {self}.",
     }
 
-    def __init__(self, id, world, data, recursive=False):
+    def __init__(self, id, world, data, recursive=True):
+        # Cooperative: run the rest of the MRO (ultimately BaseThing.__init__)
+        # first, so self.id/location exist before this mixin resolves its own
+        # object references, then set this mixin's fields.
+        #
+        # `recursive` defaults to True to match BaseThing/Place/Exit/Object.
+        # A mixin now leads the MRO, so *its* signature is the one direct
+        # construction hits -- a False default here silently stopped an
+        # OpenableExit from resolving its destination (it stayed a bare id
+        # string, and open/close then blew up announcing to it).
+        super().__init__(id, world, data, recursive)
         self.is_open = data.get("open", True)
         lpo = data.get("open_paired_object", None)
         if lpo is not None:
@@ -73,7 +91,9 @@ class Openable(StateToggle):
         self.open_paired_object = lpo
 
     def state_summary(self):
-        return ["open" if getattr(self, "is_open", True) else "closed"]
+        return super().state_summary() + [
+            "open" if getattr(self, "is_open", True) else "closed"
+        ]
 
     @make_command("open", "self")
     def open(self, player, prep=None, verb=None):
@@ -90,20 +110,22 @@ class Openable(StateToggle):
             self.world.mark_thing_changed(self.open_paired_object)
 
     def look_at(self, who):
-        if self.is_open:
-            return self.get_message("open_look_at", who)
-        else:
-            return self.get_message("closed_look_at", who)
+        return join_look(
+            super().look_at(who),
+            self.get_message("open_look_at" if self.is_open else "closed_look_at", who),
+        )
 
     def to_dict(self):
-        # This mixin's fields only; BaseThing.to_dict merges them in (unbound
-        # call, like state_summary) because the diamond MRO shadows super().
-        return {
-            "open": self.is_open,
-            "open_paired_object": self.open_paired_object.id
-            if self.open_paired_object
-            else None,
-        }
+        data = super().to_dict()
+        data.update(
+            {
+                "open": self.is_open,
+                "open_paired_object": self.open_paired_object.id
+                if self.open_paired_object
+                else None,
+            }
+        )
+        return data
 
 
 class Lockable(Openable):
@@ -115,9 +137,18 @@ class Lockable(Openable):
         "lock_fail_player": "You cannot lock {self}",
         "locked_look_at": "It is locked.",
         "unlocked_look_at": "It is unlocked.",
+        # StateToggle.toggle_on/off("locked") emits these; without them
+        # get_message fell back to "" and lock/unlock answered with a blank
+        # line (ARCHITECTURE.md 8).
+        "toggle_locked_fail_true": "That is already locked.",
+        "toggle_locked_fail_false": "That is already unlocked.",
+        "toggle_locked_on": "You lock {self}.",
+        "toggle_locked_on_others": "{player} locks {self}.",
+        "toggle_locked_off": "You unlock {self}.",
+        "toggle_locked_off_others": "{player} unlocks {self}.",
     }
 
-    def __init__(self, id, world, data, recursive=False):
+    def __init__(self, id, world, data, recursive=True):
         super().__init__(id, world, data, recursive)
         self.is_locked = data.get("is_locked", False)
         lbo = data.get("locked_by_object", None)
@@ -134,7 +165,9 @@ class Lockable(Openable):
         self.lock_paired_object = lpo
 
     def state_summary(self):
-        return ["locked" if self.is_locked else "unlocked"]
+        return super().state_summary() + [
+            "locked" if self.is_locked else "unlocked"
+        ]
 
     @make_command("open", "self")
     def open(self, player, prep=None, verb=None):
@@ -186,26 +219,34 @@ class Lockable(Openable):
         else:
             self.toggle_off("locked", player)
 
-    def look_at(self, player):
-        if self.locked:
-            return self.get_message("locked_look_at", player)
-        else:
-            return self.get_message("unlocked_look_at", player)
+    def look_at(self, who):
+        # `self.is_locked`, not `self.locked` -- this method was unreachable
+        # under the old diamond MRO, so the typo never raised.  Now that the
+        # chain runs it, the attribute has to be the real one.
+        return join_look(
+            super().look_at(who),
+            self.get_message(
+                "locked_look_at" if self.is_locked else "unlocked_look_at", who
+            ),
+        )
 
     def to_dict(self):
-        # This mixin's fields only; BaseThing.to_dict merges them in.
-        return {
-            "is_locked": self.is_locked,
-            "locked_by_object": self.locked_by_object.id
-            if self.locked_by_object
-            else None,
-            "locked_by_player": self.locked_by_player.id
-            if self.locked_by_player
-            else None,
-            "lock_paired_object": self.lock_paired_object.id
-            if self.lock_paired_object
-            else None,
-        }
+        data = super().to_dict()
+        data.update(
+            {
+                "is_locked": self.is_locked,
+                "locked_by_object": self.locked_by_object.id
+                if self.locked_by_object
+                else None,
+                "locked_by_player": self.locked_by_player.id
+                if self.locked_by_player
+                else None,
+                "lock_paired_object": self.lock_paired_object.id
+                if self.lock_paired_object
+                else None,
+            }
+        )
+        return data
 
 
 class Containable:
@@ -258,13 +299,13 @@ class Containable:
         else:
             player.tell(self.get_message("look_in_fail_closed", player))
 
-    def look_at(self, player):
-        # contents
+    def look_at(self, who):
+        desc = super().look_at(who)
+        # A closed container (Openable mixed in alongside) reveals nothing.
+        if hasattr(self, "is_open") and not self.is_open:
+            return desc
         conts = ", ".join([x.name for x in self.contents])
-        if not hasattr(self, "is_open") or self.is_open:
-            return f"Inside there is: {conts}"
-        else:
-            return ""
+        return join_look(desc, f"Inside there is: {conts}")
 
 
 # Mixin for things that can be turned on or off: a lamp, light switch, radio,
@@ -283,9 +324,8 @@ class Switchable(StateToggle):
         "off_look_at": "It is off.",
     }
 
-    def __init__(self, id, world, data, recursive=False):
-        # No super().__init__() call: the concrete class runs BaseThing.__init__
-        # first, then calls this explicitly (see Positionable.__init__ note).
+    def __init__(self, id, world, data, recursive=True):
+        super().__init__(id, world, data, recursive)
         self.is_on = data.get("is_on", False)
         # Optional: a device this one drives when toggled (e.g. a wall switch
         # paired with the lamp it controls), mirroring Openable.open_paired_object.
@@ -293,15 +333,19 @@ class Switchable(StateToggle):
         self.on_paired_object = world.get_object(po) if po else None
 
     def to_dict(self):
-        return {
-            "is_on": self.is_on,
-            "on_paired_object": self.on_paired_object.id
-            if self.on_paired_object
-            else None,
-        }
+        data = super().to_dict()
+        data.update(
+            {
+                "is_on": self.is_on,
+                "on_paired_object": self.on_paired_object.id
+                if self.on_paired_object
+                else None,
+            }
+        )
+        return data
 
     def state_summary(self):
-        return ["on" if self.is_on else "off"]
+        return super().state_summary() + ["on" if self.is_on else "off"]
 
     # --- commands ---
     # Many natural phrasings for the same action; the handler (power) decides
@@ -324,9 +368,10 @@ class Switchable(StateToggle):
             self.world.mark_thing_changed(self.on_paired_object)
 
     def look_at(self, who):
-        if self.is_on:
-            return self.get_message("on_look_at", who)
-        return self.get_message("off_look_at", who)
+        return join_look(
+            super().look_at(who),
+            self.get_message("on_look_at" if self.is_on else "off_look_at", who),
+        )
 
 
 # --- Positionable ----------------------------------------------------------
@@ -373,12 +418,8 @@ class Positionable:
         "position_fail_location": "You can't do that to {self} from here.",
     }
 
-    def __init__(self, id, world, data, recursive=False):
-        # Deliberately does NOT call super().__init__(): the concrete class
-        # (e.g. PositionableObject) runs BaseThing.__init__ via its own super(), then
-        # calls Positionable.__init__ explicitly -- the same pattern Openable
-        # and the other state mixins use.  Calling super() here would run the
-        # `object.__init__` leaf with extra args and raise.
+    def __init__(self, id, world, data, recursive=True):
+        super().__init__(id, world, data, recursive)
         self.positioned = {}  # position -> list of [thing, verb_or_None]
         for prep, entries in (data.get("positioned") or {}).items():
             pos = POSITIONS.get(prep, prep)
@@ -400,18 +441,21 @@ class Positionable:
     # --- persistence / state (consulted by BaseThing.to_dict) ---
 
     def to_dict(self):
-        """This mixin's fields only; BaseThing.to_dict merges them in."""
-        return {
-            "positioned": {
-                pos: [{"id": t.id, "verb": v} for (t, v) in entries]
-                for pos, entries in self.positioned.items()
+        data = super().to_dict()
+        data.update(
+            {
+                "positioned": {
+                    pos: [{"id": t.id, "verb": v} for (t, v) in entries]
+                    for pos, entries in self.positioned.items()
+                }
             }
-        }
+        )
+        return data
 
     def state_summary(self):
         # A Positionable has no state of its own -- the position is reported
-        # from the *child* side (see BaseThing.thing_summary).  Returns none.
-        return []
+        # from the *child* side (see BaseThing.thing_summary).
+        return super().state_summary()
 
     # --- positioning operations ---
 
@@ -520,11 +564,11 @@ class Positionable:
 
     def look_at(self, who):
         """What is positioned relative to this thing (when you look at it)."""
-        lines = []
+        lines = [super().look_at(who)]
         for pos, entries in self.positioned.items():
             for (t, verb) in entries:
                 lines.append(self.position_line(t, pos, verb))
-        return "\n".join(lines)
+        return join_look(*lines)
 
 
 class Holdable:
@@ -538,24 +582,27 @@ class Holdable:
         "unwield_failed_not_wielding": "You cannot put away {self}, as you are not holding it.",
     }
 
-    def __init__(self, id, world, data, recursive=False):
+    def __init__(self, id, world, data, recursive=True):
+        super().__init__(id, world, data, recursive)
         hb = data.get("held_by", None)
         self.held_by = world.get_object(hb) if hb else None
 
     def to_dict(self):
-        # This mixin's fields only; BaseThing.to_dict merges them in.
-        return {
-            "held_by": self.held_by.id if self.held_by else None,
-        }
+        data = super().to_dict()
+        data.update({"held_by": self.held_by.id if self.held_by else None})
+        return data
 
     def state_summary(self):
-        return ["held"] if getattr(self, "held_by", None) is not None else []
+        s = super().state_summary()
+        if getattr(self, "held_by", None) is not None:
+            s = s + ["held"]
+        return s
 
     def contained_look_at(self, who=None):
-        if self.held_by is not None:
-            return f"Held: {self.name}"
-        else:
-            return ""
+        return join_look(
+            super().contained_look_at(who),
+            f"Held: {self.name}" if self.held_by is not None else "",
+        )
 
     @make_command(["wield", "hold"], "self")
     def wield(self, player, prep=None, verb=None):
@@ -599,24 +646,33 @@ class Wearable:
         "remove_failed_not_wearing": "You cannot take off {self}, as you are not wearing it.",
     }
 
-    def __init__(self, id, world, data, recursive=False):
+    def __init__(self, id, world, data, recursive=True):
+        super().__init__(id, world, data, recursive)
         wb = data.get("worn_by", None)
         self.worn_by = world.get_object(wb) if wb else None
 
     def to_dict(self):
-        # This mixin's fields only; BaseThing.to_dict merges them in.
-        return {
-            "worn_by": self.worn_by.id if self.worn_by else None,
-        }
+        data = super().to_dict()
+        data.update({"worn_by": self.worn_by.id if self.worn_by else None})
+        return data
 
     def contained_look_at(self, who=None):
-        if self.worn_by is not None:
-            return f"Worn: {self.name}"
-        else:
-            return ""
+        return join_look(
+            super().contained_look_at(who),
+            f"Worn: {self.name}" if self.worn_by is not None else "",
+        )
 
     def state_summary(self):
-        return ["worn"] if getattr(self, "worn_by", None) is not None else []
+        s = super().state_summary()
+        if getattr(self, "worn_by", None) is not None:
+            s = s + ["worn"]
+        return s
+
+    def look_at(self, who):
+        # Wearable alone reports the worn line on `look at <garment>`; Holdable
+        # deliberately does not (a held thing reads as held only from the
+        # carrier's side), which is the behaviour the old composites had.
+        return join_look(super().look_at(who), self.contained_look_at(who))
 
     @make_command("wear", "self")
     def wear(self, player, prep=None, verb=None):

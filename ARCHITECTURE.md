@@ -11,9 +11,14 @@ and the design quirks that look like bugs but aren't.
 Azimuth is a **LambdaMOO-inspired M\* (MetaMUD) server in modern Python**, started
 as a "vibe coding" experiment and grown into a working engine with an AI layer:
 
-- **Data-driven objects** — every object is a plain JSON dict with a `class`
-  string, rehydrated dynamically at load time (`World.import_class` uses
-  `importlib`), so a class can even be *reassigned at runtime* via `@chparent`.
+- **Data-driven objects** — every object is a plain JSON dict recording an
+  entity *base* plus a set of *mixins*; the class for that combination is
+  looked up or composed at runtime (`azimuth/classfactory.py`), so an object's
+  capabilities can change from inside the MUD (`@addmixin`) and its class be
+  reassigned (`@chparent`).
+- **Verbs in the database** — Python source stored in the world and compiled
+  onto a composed class at init (`@verb`), so a combination needing a dozen
+  lines does not need a class in the codebase.
 - **A MOO-style programmer tier** — `Programmer` players get `eval` (with `#name`
   object references), `@create`, `@dig`, `@chparent`, `@message`, … to build and
   edit the world from inside the MUD.
@@ -22,10 +27,10 @@ as a "vibe coding" experiment and grown into a working engine with an AI layer:
 
 ### State as of writing
 
-- Tests: **39/39 passing** on the file backend (`python run-tests.py`) and on
-  sqlite (`python run-tests.py --db sqlite`): 20 game-logic + 8 storage-contract
-  + 11 out-of-band state-channel tests (the contract tests run against *both*
-  backends in-process).
+- Tests: **100/100 passing** on the file backend (`python run-tests.py`) and on
+  sqlite (`python run-tests.py --db sqlite`) — game logic, storage contract
+  (run against *both* backends in-process), the out-of-band state channel, and
+  class composition (`tests/test_compose.py`).
 - The working tree may have uncommitted changes (user + agent edits interleave);
   run `git status` first. Do not revert changes you did not make.
 - `db/` (world state) and `.env` are **gitignored** — they do not survive a git
@@ -38,8 +43,9 @@ as a "vibe coding" experiment and grown into a working engine with an AI layer:
 | `azimuth/main.py` | FastAPI + Socket.IO ASGI app; REST endpoints; MCP mount **commented out** (see §6.1) |
 | `azimuth/world.py` | `World` class: object cache, lazy loading, login/register, **the command dispatcher**, `setup_world` bootstrap |
 | `azimuth/command_decorator.py` | `@make_command` decorator + global `commands` registry |
-| `azimuth/entities.py` | `BaseThing`/`Place`/`Exit`/`Object`/`Player`/`Programmer` + composite classes (`Container`, `Clothing`, `Furniture`, `HeldObject`, `OpenableExit`, `LockableExit`, `OpenableContainer`) |
-| `azimuth/mixins.py` | Capability mixins: `StateToggle`→`Openable`/`Lockable`/`Switchable`, `Containable`, `Positionable`, `Holdable`, `Wearable` |
+| `azimuth/entities.py` | `BaseThing`/`Place`/`Exit`/`Object`/`Player`/`Programmer` + the hand-written base+mixin combinations (`Container`, `OpenableContainer`, `PositionableObject`, `WearableObject`, `SwitchableObject`, `HeldObject`, `OpenableExit`, `LockableExit`) and `EdibleThing` |
+| `azimuth/mixins.py` | Capability mixins: `StateToggle`→`Openable`/`Lockable`/`Switchable`, `Containable`, `Positionable`, `Holdable`, `Wearable`. All **cooperative**: each chains `super()` in `__init__`/`to_dict`/`look_at`/`state_summary` |
+| `azimuth/classfactory.py` | base + mixins → class (`CANON` names, normalization, `type()` synthesis, eager build at init); stored-verb compilation |
 | `azimuth/persistence.py` | `Storage` ABC, `SimpleFileStorage` (default), `SqliteStorage`, `MlStorage` (MarkLogic) |
 | `azimuth/agents/` | `RoomBuilderAgent` (in-process LLM world-builder), `config.py` (env-driven config + system prompts) |
 | `azimuth/templates/index.html` | Browser terminal client (socket.io from CDN) |
@@ -140,8 +146,11 @@ Registration → merge → dispatch, three stages:
    `self.commands`, into a per-instance `commands_cached` dict.
    **Important fix (already in):** the walk uses
    `c.__dict__.get("default_commands")` and skips `None` — plain attribute access
-   would make a command-less subclass (HeldObject, Container, Clothing,
-   Furniture, LockableExit) inherit its parent's dict and merge it twice.
+   would make a command-less subclass (Container, OpenableContainer,
+   WearableObject, HeldObject, LockableExit -- and *every* synthesized class,
+   which declares none of its own) inherit its parent's dict and merge it
+   twice.  This is also what makes a composed class work with no changes to
+   the command system at all.
    Each *distinct* handler appears exactly once. The merged list is
    shallowest-ancestor-first, which is why the dispatcher (step 3) walks it in
    `reversed(...)` order — otherwise a generic ancestor handler would shadow
@@ -188,30 +197,119 @@ BaseThing  (uuid, location/contents graph, move_to, look_at, messages, match_obj
 ├── Place   (exits dict keyed by exit name, coordinates, room look/announce)
 │   └── (rooms created by setup_world / agent / @dig)
 ├── Exit    (source/destination, use() = move + announces; lazy destination)
-│   ├── OpenableExit   (Exit, Openable) — closed blocks travel; announces across
-│   └── LockableExit   (OpenableExit, Lockable)
+│   ├── OpenableExit   (Openable, Exit) — closed blocks travel; announces across
+│   └── LockableExit   (Lockable, OpenableExit)
 ├── Object  (get/drop/use + take_ok/drop_ok/use_*_ok + *_effect hooks)
-│   ├── Container      (Object, Containable) — put/take-from/look-in
-│   ├── OpenableContainer
-│   ├── Furniture      (Object, Positionable — mostly stubs, prints "saw: …")
-│   ├── Clothing       (Object, Containable, Wearable)
-│   └── HeldObject     (Object, Holdable — wield/unwield)
+│   ├── Container            (Containable, Object)  — put/take-from/look-in
+│   ├── OpenableContainer    (Openable, Container)
+│   ├── PositionableObject   (Positionable, Object) — take_ok = False
+│   ├── WearableObject       (Wearable, Containable, Object)
+│   ├── SwitchableObject     (Switchable, Object)
+│   ├── HeldObject           (Holdable, Object)     — wield/unwield
+│   └── EdibleThing          (Object)               — eat, destroy
 └── Player  (connection sid, username, password_hash, last_location, home,
     │        say/emote/whisper(stub)/who/@quit/@desc/@home/@sethome/inv)
     └── Programmer  (eval with #refs, @dig, @create, @chparent, @rename,
-                     @teleport, @dumpdb, @messages/@message)
+                     @teleport, @dumpdb, @messages/@message,
+                     @mixins/@addmixin/@rmmixin, @verbs/@verb/@rmverb)
 ```
+
+Every class on the Exit/Object branches except `EdibleThing` is just a
+base + mixins combination; they exist as hand-written classes only where they
+carry extra Python (or, for the empty ones, as names old worlds already use).
+Anything else is composed at runtime — see §6.2.1.
 
 Mixins (`mixins.py`) provide the state machinery: `StateToggle.toggle_on/off`
 drives `Openable` (is_open + paired object) / `Lockable` (is_locked,
-locked_by_object/player) / `Switchable` (is_on, no commands yet).
+locked_by_object/player) / `Switchable` (is_on).
 
-**Note the mixin MROs are diamonds** — e.g.
-`LockableExit.__mro__` = `LockableExit → OpenableExit → Exit → BaseThing → Lockable → Openable → StateToggle`
-(`BaseThing` lands *before* `Lockable`!). This is why dispatch order matters
-here: the dispatcher walks each verb's entries deepest-first, so the specialized
-handler (e.g. `OpenableExit.use`'s closed check, `Lockable.open`'s lock check)
-beats the generic ancestor.
+**Mixins come first in the bases, and chain cooperatively.** Every composite
+above is declared mixins-first (`class OpenableExit(Openable, Exit)`), so:
+
+```
+LockableExit → Lockable → OpenableExit → Openable → StateToggle → Exit → BaseThing
+```
+
+`BaseThing` is *last*, which is what makes ordinary `super()` work. Each mixin
+implements `__init__` / `to_dict` / `look_at` / `state_summary` as
+`super()` first, then its own contribution; `BaseThing` terminates the chain.
+That removed three hacks that the old mixins-*last* diamond forced:
+
+- the explicit `Openable.__init__(self, ...)` call in every composite,
+- the hardcoded mixin tuple with unbound calls in `BaseThing.to_dict`,
+- the same tuple again in `BaseThing.state_summary`.
+
+Dispatch order still matters, and still works the same way: the dispatcher
+walks each verb's entries deepest-first, so `Lockable.open`'s lock check beats
+`Openable.open`, and `OpenableExit.open`'s far-side announcement sits between
+them.
+
+**Two traps if you add a mixin.** (1) Its `__init__` must default
+`recursive=True`, matching `BaseThing`/`Place`/`Exit` — a mixin now *leads* the
+MRO, so its signature is the one direct construction hits, and a `False`
+default silently left an `OpenableExit` with an unresolved `destination`.
+(2) Register it in `classfactory.MIXINS`, or objects cannot name it.
+
+### 6.2.1 Composed classes (`classfactory.py`)
+
+An object records `{"class": "Object", "mixins": ["Containable", "Openable"]}`.
+Resolving that:
+
+1. **Normalize** — validate names against the `MIXINS` vocabulary (anything
+   else is rejected: `mixins` is database content, and an arbitrary importable
+   name would be an arbitrary-base-class injection), drop any mixin another
+   already derives from (`Lockable` implies `Openable`), sort.
+2. **Name** — `CANON` when a hand-written class covers the combination, else
+   `<Mixins alphabetically><Base>`. The existing names follow no algorithm
+   (`OpenableExit` mixin-first, `PositionableObject` base-last, `Container`
+   neither), so `CANON` is explicit — and doubles as the compatibility map
+   that keeps old db records, tests and agent prompts resolving by name.
+3. **Prefer code** — a class of that name in the base's module or
+   `azimuth.entities` wins, keeping its overrides. One that covers only *part*
+   of the mixin set gets the remainder mixed in on top rather than losing it.
+4. **Otherwise `type()`**, mixins first.
+
+The resolved class is stamped with `_az_base`/`_az_mixins` **in its own
+`__dict__`**, and `BaseThing.to_dict` writes those back out — read with
+`cls.__dict__.get`, never attribute access, or a hand-written subclass would
+inherit its ancestor's identity and be persisted as it. `ClassFactory` is
+**per-world** (stored verbs must not leak between worlds in one process) and
+primes every `CANON` entry at construction, so classes built directly by
+`setup_world` or the agent are stamped too.
+
+`build_from_database()` resolves every combination the stored world uses, at
+init. The point is not speed (one `type()` per combination): it turns a typo'd
+mixin name into one error at boot instead of a mystery hours later. Lazy
+resolution in `make_instance` remains the backstop for combinations invented
+after startup. Backends that cannot enumerate (`DictStorage`, `MlStorage` —
+neither has `iter_ids`) skip the eager pass and rely on it.
+
+### 6.2.2 Stored verbs
+
+`{WORLD_ID}_classes` holds Python source keyed by canonical class name;
+`attach_verbs` compiles it onto a **per-world subclass** of the resolved class
+(never the shared class itself) whose own `default_commands` carries the verbs,
+so `get_commands` merges them last and the dispatcher reaches them first.
+Three things that are not obvious:
+
+- **No zero-argument `super()`** — `exec`'d code has no `__class__` closure
+  cell. The class is injected as `cls`; stored code writes `super(cls, self)`.
+- **The signature is data, not a decorator** — `@make_command` inside stored
+  source registers into the *global* registry under a bogus `(None, name)` key,
+  and the next `register_commands()` dies with `AttributeError` on `NoneType`.
+  Hence the `shapes` field.
+- **A verb name does not cover a verb's argument shapes** — `Exit` registers
+  `use` under two structures; a stored `use` declaring only one leaves `go
+  through <door>` on the inherited handler. `attach_verbs` logs a warning
+  naming exactly which shapes are still shadowed.
+
+A compile failure is logged and the verb skipped, so one bad verb cannot make a
+world unloadable; `@verb` also compiles before committing, so a syntax error is
+a message to the programmer, not a broken world. **This is `exec` of database
+content running in the server process for every player who triggers the verb.**
+The namespace is restricted (`SAFE_BUILTINS`) but that is not a sandbox —
+dunder traversal walks straight out of it. Writing is Programmer-tier and each
+verb records its author and timestamp.
 
 ### 6.3 Persistence (`azimuth/persistence.py`)
 
@@ -219,7 +317,21 @@ The `Storage` base class declares only `load`/`save`/`get_object_by_name`/
 `get_object_by_id`; `delete`/`get_all_objects`/`iter_ids`/`close` exist on the
 backends that support them (deliberately not in the base — `MlStorage` still
 lacks `get_all_objects`). All methods take/return **plain dicts**; `World`
-rehydrates them via `make_instance` (which reads the `class` key).
+rehydrates them via `make_instance` → `ClassFactory.resolve_from_data`, which
+accepts both the current `{"class": base, "mixins": [...]}` form and a legacy
+`{"class": "OpenableContainer"}` name (routed through the same path, so both
+persist identically afterwards).
+
+**Class filtering is `issubclass` now, not name equality.** A `Container` is
+stored as `Object` + `Containable`, so `data["class"] == clss.__name__` could
+not match it. The filter still runs *in* the backend (it has to apply before
+the unique/ambiguous decision), but the decision is delegated:
+`Storage.matches_class` calls a `class_matcher` that `World` installs, which
+composes the class and asks `issubclass` — the same semantics
+`World.get_object_by_name` already applied to its in-memory cache. The default
+stays name equality so a backend used standalone (as the contract tests do,
+with local dummy classes) still works. `SqliteStorage` therefore filters
+fetched rows in Python rather than with `AND class = ?`.
 
 Shared lookup contract (pinned by `tests/test_storage.py`, which runs every
 scenario against **both** file and sqlite backends):
@@ -233,15 +345,14 @@ scenario against **both** file and sqlite backends):
 - `get_all_objects(clss)` — every stored dict, optionally class-filtered.
 
 - `SimpleFileStorage(directory="db")` — one JSON file per object; `id` is the
-  filename (`/` → `___`). **Name search shells out to `grep`** (`shlex.quote`d
-  — once a raw shell injection; `subprocess.run(..., capture_output=True)` —
-  grep exits 1 on no match, which used to raise `CalledProcessError`). Returns
-  `None` when multiple files match. Expect the "File does not exist" /
-  "Multiple files found" prints. Ambiguous id lookups return a **list of ids**
-  (they used to return full file paths). **Deliberate divergence from sqlite**
-  (documented in the test, not "fixed"): the file backend greps *substrings* of
-  whole files — a name appearing in another object's description, or a partial
-  name, matches — while sqlite does an exact name-or-alias match.
+  filename (`/` → `___`). Name search is a field-accurate, case-insensitive
+  exact match on `name` or any alias, mirroring sqlite (it once shelled out to
+  `grep` over whole files, which also matched descriptions and class names).
+  Returns `None` when multiple files match — expect the "Multiple files found"
+  print; a *missing* file is an ordinary outcome and is now `logger.debug`, not
+  stdout noise, since optional world records like `{WORLD_ID}_classes` are
+  absent in most worlds. Ambiguous id lookups return a **list of ids** (they
+  used to return full file paths).
 - `SqliteStorage(path="db/azimuth.db")` — one row per object in a single
   database file (stdlib `sqlite3`, no new dependency; selected via
   `AZIMUTH_DB_TYPE=sqlite`, path via `AZIMUTH_SQLITE_PATH`). Schema: `objects(
@@ -310,20 +421,20 @@ either rewrite or delete it.
 
 ## 8. Other known issues (curated)
 
-- **`Lockable` message keys missing** — `StateToggle.toggle_on/off` emits
-  `toggle_locked_on`/`toggle_locked_off`/`*_others`, none of which exist in
-  `Lockable.default_messages`; `get_message` falls back to `""`, so `lock`/
-  `unlock` reply with a blank line. Adding the keys is a one-liner each.
+- ~~**`Lockable` message keys missing**~~ — **fixed**: the
+  `toggle_locked_*` keys are in `Lockable.default_messages` now (`@addmixin
+  <thing> to Lockable` made the blank replies impossible to ignore).
 - **`unlock` shares the old pattern** — failure message then unconditional
   `toggle_off` (no `return`); only bites when `locked_by_player` is set, which
   nothing in the current world does. Mirror the `lock` fix if you wire up
   lock-keys.
-- **The `open` name collision is a live hazard** — the mixin fix covers
-  `lock`/`lock_with`, but anywhere else code does `if self.open` on an exit it
-  gets a truthy method. Use `self.is_open`. (Renaming the command methods to
-  e.g. `do_open` would defuse it for good.)
-- **`Positionable` is a stub** — `sit/stand/…` handlers just print `saw: …`;
-  `Positionable.look_at` returns `""`.
+- **The `open` name collision is a live hazard** — anywhere code does
+  `if self.open` on an exit it gets a truthy *method*. Use `self.is_open`.
+  (`OpenableExit.open`/`close` had exactly this bug — both announced to the far
+  side unconditionally — and are fixed; `Lockable.lock`/`lock_with` were fixed
+  earlier. Renaming the command methods to e.g. `do_open` would defuse it for
+  good.)
+- **`Positionable` is a stub** — `sit/stand/…` handlers just print `saw: …`.
 - **`whisper` is an empty stub** on `Player` (registered, does nothing).
 - **`run-agent.py` is stale** (see §6.5); `run-repl.py` has no main block.
 - **spaCy/bagpipes_spacy are missing from `requirements.txt`** (only needed by
@@ -332,8 +443,11 @@ either rewrite or delete it.
   (harmless; tidy up if touching the file).
 - **`Positionable`/`Switchable` `StateToggle` machinery**: `Switchable` has no
   commands yet (levers/buttons unimplemented).
-- **grep-based name search** (`SimpleFileStorage.get_object_by_name`) is fuzzy:
-  a name appearing in another object's description/file yields `None`.
+- **`MlStorage` class filtering is partial** — it has no `iter_ids`/
+  `get_all_objects`, so it skips the eager class build, and its server-side
+  `clss` filter matches the stored *base* only; the mixin half is applied
+  locally to whatever comes back. Indexing `mixins` would fix it properly if
+  that backend comes back into use.
 - **Debug print left behind**: `Object.okay_for_verb` in entities.py still has
   `print("failed match for location")` — safe to remove.
 - **`--reload` watches `db/` and `.venv/`** — expect server restarts when those
@@ -341,8 +455,8 @@ either rewrite or delete it.
 
 ## 9. Suggested next steps (roughly in order)
 
-1. Tidy the §8 door nits (missing `Lockable` message keys, `unlock` pattern,
-   optionally rename the `open` command methods).
+1. Tidy the remaining §8 door nits (`unlock`'s missing `return`, optionally
+   rename the `open` command methods so `self.open` stops being a trap).
 2. Narrow `run.py`'s reload watch dirs.
 3. Rewrite-or-delete `run-agent.py`; give `run-repl.py` a real main loop.
 4. Re-enable the MCP mount (§6.1) and add *write* actions (create/modify) —

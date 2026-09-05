@@ -1,11 +1,39 @@
 import os
 import json
 import glob
+import logging
 import sqlite3
 import requests
 
+logger = logging.getLogger(__name__)
+
 
 class Storage:
+    # --- class filtering ---------------------------------------------------
+    # `clss` narrows a lookup, and it has to be applied *before* the
+    # unique/ambiguous decision, so the filtering itself belongs here in the
+    # backend.  But a stored object no longer names its class directly -- it
+    # records a base plus a mixin set (see classfactory.py), so
+    # `data["class"] == clss.__name__` would no longer match a Container
+    # stored as {"class": "Object", "mixins": ["Containable"]}.
+    #
+    # The *decision* is therefore delegated: World installs a matcher that
+    # composes the class and uses issubclass (the same semantics
+    # World.get_object_by_name already applies to its in-memory cache).  The
+    # default stays name equality, so a backend used standalone -- as the
+    # storage contract tests do, with locally defined dummy classes -- keeps
+    # working with no world attached.
+    class_matcher = None
+
+    def matches_class(self, data, clss):
+        if clss is None:
+            return True
+        if not data:
+            return False
+        if self.class_matcher is not None:
+            return self.class_matcher(data, clss)
+        return data.get("class") == clss.__name__
+
     def get_object_by_name(self, name, clss=None):
         return None
 
@@ -69,7 +97,10 @@ class SimpleFileStorage(Storage):
         if js is not None:
             return js
         else:
-            print(f"File does not exist: {self.directory}/{fn}")
+            # A miss is an ordinary outcome (World.get_object relies on it,
+            # and optional world records like {WORLD_ID}_classes are absent in
+            # most worlds), so this is debug, not stdout noise on every start.
+            logger.debug(f"File does not exist: {self.directory}/{fn}")
             return None
 
     def save(self, what):
@@ -102,9 +133,7 @@ class SimpleFileStorage(Storage):
             # apply it, even to a single match); the players file and other
             # class-less docs must not break this.
             files = [
-                f
-                for f in files
-                if (self._read_file(f) or {}).get("class") == clss.__name__
+                f for f in files if self.matches_class(self._read_file(f), clss)
             ]
         if len(files) == 1:
             return self.load(self._file_to_id(files[0]))
@@ -135,8 +164,7 @@ class SimpleFileStorage(Storage):
             files = [
                 fid
                 for fid in files
-                if (self._read_file(fid + self.suffix) or {}).get("class")
-                == clss.__name__
+                if self.matches_class(self._read_file(fid + self.suffix), clss)
             ]
         if len(files) == 1:
             return self.load(files[0])
@@ -148,7 +176,7 @@ class SimpleFileStorage(Storage):
         objs = []
         for id in self.iter_ids():
             obj = self.load(id)
-            if clss is None or "class" in obj and obj["class"] == clss.__name__:
+            if obj and self.matches_class(obj, clss):
                 objs.append(obj)
         return objs
 
@@ -218,12 +246,9 @@ class SqliteStorage(Storage):
     def get_object_by_id(self, id, clss=None):
         # Prefix match; escape LIKE wildcards so ids with them can't widen it.
         prefix = id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        sql = "SELECT id FROM objects WHERE id LIKE ? ESCAPE '\\'"
+        sql = "SELECT id, data FROM objects WHERE id LIKE ? ESCAPE '\\'"
         args = [prefix + "%"]
-        if clss is not None:
-            sql += " AND class = ?"
-            args.append(clss.__name__)
-        ids = [r[0] for r in self.conn.execute(sql, args)]
+        ids = self._filter_rows(self.conn.execute(sql, args), clss)
         if len(ids) == 1:
             return self.load(ids[0])
         elif len(ids) > 1:
@@ -238,24 +263,36 @@ class SqliteStorage(Storage):
         # `AND class = ?`) applies to both halves -- without them, AND binds
         # only to the aliases half and rows matched by name slip past it.
         sql = (
-            "SELECT id FROM objects WHERE (lower(name) = lower(?)"
+            "SELECT id, data FROM objects WHERE (lower(name) = lower(?)"
             " OR lower(aliases) LIKE ?)"
         )
         args = [name, f'%\"{name.lower()}\"%']
-        if clss is not None:
-            sql += " AND class = ?"
-            args.append(clss.__name__)
-        ids = [r[0] for r in self.conn.execute(sql, args)]
+        ids = self._filter_rows(self.conn.execute(sql, args), clss)
         if len(ids) == 1:
             return self.load(ids[0])
         return None
 
+    def _filter_rows(self, rows, clss):
+        """Ids of the (id, data) rows whose object satisfies the class
+        filter.  Applied in Python rather than as `AND class = ?` because a
+        composed class is not a column value (see Storage.matches_class)."""
+        out = []
+        for (id, data) in rows:
+            if clss is None:
+                out.append(id)
+                continue
+            try:
+                doc = json.loads(data)
+            except Exception:
+                continue
+            if self.matches_class(doc, clss):
+                out.append(id)
+        return out
+
     def get_all_objects(self, clss=None):
-        if clss is not None:
-            rows = self.conn.execute("SELECT data FROM objects WHERE class = ?", (clss.__name__,))
-        else:
-            rows = self.conn.execute("SELECT data FROM objects")
-        return [json.loads(r[0]) for r in rows]
+        rows = self.conn.execute("SELECT data FROM objects")
+        objs = [json.loads(r[0]) for r in rows]
+        return [o for o in objs if self.matches_class(o, clss)]
 
 
 class MlStorage(Storage):
@@ -328,19 +365,33 @@ class MlStorage(Storage):
         else:
             return []
 
+    # NOTE: the class filter here is still a server-side match on the stored
+    # `class` field, which is now the *base* class name.  It therefore selects
+    # on the base only; the mixin half of the filter is applied locally to
+    # whatever comes back.  Pushing the full predicate into MarkLogic would
+    # mean indexing `mixins` and expanding the requested class into the set of
+    # base+mixin combinations that satisfy it -- worth doing if this backend
+    # comes back into use.
+    def _base_query(self, clss):
+        base = getattr(clss, "_az_base", None) or clss.__name__
+        return {"fieldWordQuery": {"field": "class", "text": base}}
+
+    def _local_filter(self, result, clss):
+        if clss is None or not isinstance(result, dict):
+            return result
+        return result if self.matches_class(result, clss) else None
+
     def get_object_by_id(self, docid, clss=None):
         # id is leading fragment, not the full id (otherwise would just use load)
         fwq = {"fieldWordQuery": {"field": "id", "text": f"{docid}*"}}
         if clss is not None:
-            cfwq = {"fieldWordQuery": {"field": "class", "text": clss.__name__}}
-            fwq = {"andQuery": {"queries": [fwq, cfwq]}}
+            fwq = {"andQuery": {"queries": [fwq, self._base_query(clss)]}}
         cts = {"ctsquery": fwq}
-        return self.do_search(cts)
+        return self._local_filter(self.do_search(cts), clss)
 
     def get_object_by_name(self, name, clss=None):
         fwq = {"fieldWordQuery": {"field": "name", "text": name}}
         if clss is not None:
-            cfwq = {"fieldWordQuery": {"field": "class", "text": clss.__name__}}
-            fwq = {"andQuery": {"queries": [fwq, cfwq]}}
+            fwq = {"andQuery": {"queries": [fwq, self._base_query(clss)]}}
         cts = {"ctsquery": fwq}
-        return self.do_search(cts)
+        return self._local_filter(self.do_search(cts), clss)

@@ -73,7 +73,14 @@ system with `{player}`/`{self}`/`{object}` formatting) → `Place` (exits, room
 announcements) → `Exit` (movement, lazy destination) → `Object` (take/drop/use with
 `*_ok`/`*_effect` hooks). Capability mixins implement the usual MUD semantics:
 `Openable`/`Lockable` (state toggles), `Containable`, `Switchable`, `Positionable`,
-`Holdable` (wield), `Wearable`.
+`Holdable` (wield), `Wearable`, `Vehicle`, `Enterable`.
+
+**Vehicles** ride on the same machinery and need no class of their own: a
+bicycle is `Object + Positionable + Vehicle` (you sit *on* it, and it carries
+you), a car is `Object + Enterable + Vehicle` (you sit *in* it — the car owns
+an `Interior` place, so passengers never change location when it drives). Exits
+carry a `max_vehicle_size`, which is why a car cannot go through a front door
+but a garage door — the same class, set wide — lets it through.
 
 **Composition, not a class per combination.** An object stores what it *is* —
 `{"class": "Object", "mixins": ["Containable", "Openable"]}` — and
@@ -107,7 +114,7 @@ switching the server over is just `AZIMUTH_DB_TYPE=sqlite` in `.env`).
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python run-tests.py      # verify: 107/107 passed
+.venv/bin/python run-tests.py      # verify: 136/136 passed
 .venv/bin/python run.py            # server on 0.0.0.0:5001 (uvicorn, --reload)
 ```
 

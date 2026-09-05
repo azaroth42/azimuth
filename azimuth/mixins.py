@@ -700,3 +700,285 @@ class Wearable:
                 self.get_message("remove_others", player), player
             )
             self.world.mark_thing_changed(self)
+
+
+# --- Vehicles --------------------------------------------------------------
+# A vehicle's size gates which exits it can be driven through: every Exit
+# carries a `max_vehicle_size`, and anything bigger stays put.  A plain exit --
+# a road, an archway, a gap in the hedge -- takes anything; a door is only
+# bike-wide unless it says otherwise, which is the whole difference between a
+# front door and a garage door.
+VEHICLE_SMALL = 1   # wheel it through a doorway: a bicycle
+VEHICLE_LARGE = 2   # needs a road or a garage door: a car
+VEHICLE_NONE = 0    # set as an exit's max_vehicle_size to bar vehicles outright
+
+
+class Vehicle:
+    """A thing you travel in or on: it stays put in a room, cannot be carried,
+    and can be driven through the exits of wherever it is standing.
+
+    *How* you ride is a separate mixin, because the two kinds differ exactly
+    where it matters:
+
+    * ``Positionable`` + ``Vehicle`` -- you sit **on** it (a bicycle).  Riders
+      keep their own location, so the vehicle has to carry them along when it
+      moves.
+    * ``Enterable`` + ``Vehicle`` -- you sit **in** it (a car).  Riders stand
+      in the vehicle's own interior Place, which travels with the vehicle for
+      free: their location never changes, so nothing has to be carried.
+
+    Which one is in play is read off the sibling mixin's own state
+    (``positioned`` / ``interior``) rather than declared again here -- the
+    same duck-typing ``Containable.look_at`` uses to notice an ``is_open``.
+    """
+
+    default_messages = {
+        "take_fail": "{self} is not something you can carry around.",
+        # "through {object}" reads right for a named exit and matches the
+        # in-band wording Exit already uses ("You go through south").
+        "drive": "You drive {self} through {object}.",
+        "drive_others": "{player} drives {self} through {object}.",
+        "drive_arrive": "{player} arrives, driving {self}.",
+        "drive_moved": "{self} moves off.",
+        "drive_fail_not_aboard": "You need to be aboard {self} first.",
+        "drive_fail_not_placed": "{self} is not anywhere you can drive it.",
+        "drive_fail_no_exit": "You can't drive that way.",
+        "drive_fail_closed": "{object} is closed.",
+        "drive_fail_size": "{self} will not fit through {object}.",
+        "dismount": "You get off {self}.",
+        "dismount_others": "{player} gets off {self}.",
+        "dismount_fail": "You are not on {self}.",
+    }
+
+    def __init__(self, id, world, data, recursive=True):
+        super().__init__(id, world, data, recursive)
+        self.vehicle_size = data.get("vehicle_size", VEHICLE_SMALL)
+
+    def to_dict(self):
+        data = super().to_dict()
+        data.update({"vehicle_size": self.vehicle_size})
+        return data
+
+    def state_summary(self):
+        states = super().state_summary()
+        return states + ["occupied"] if self.occupants() else states
+
+    # --- who is aboard ----------------------------------------------------
+
+    def occupants(self):
+        """Everything riding: whatever is in the interior, or positioned on
+        the vehicle.  Objects count as well as players -- a basket strapped to
+        the bike travels with it."""
+        interior = getattr(self, "interior", None)
+        if interior is not None:
+            return list(interior.contents)
+        out = []
+        for entries in (getattr(self, "positioned", None) or {}).values():
+            for (thing, _verb) in entries:
+                if thing not in out:
+                    out.append(thing)
+        return out
+
+    def riders(self):
+        """Occupants that can be told things (players)."""
+        return [o for o in self.occupants() if hasattr(o, "tell")]
+
+    def is_aboard(self, who):
+        return who in self.occupants()
+
+    def take_ok(self, player):
+        return False
+
+    # --- driving ----------------------------------------------------------
+
+    def vehicle_room(self):
+        """The Place the vehicle is standing in, or None if it is nowhere it
+        could be driven from (in someone's hands, inside another vehicle)."""
+        loc = self.location
+        return loc if hasattr(loc, "exits") else None
+
+    @make_command(["drive", "ride", "pedal"], "any")
+    def drive(self, player, direction, prep=None, verb=None):
+        """drive <direction> -- take the vehicle out through an exit."""
+        self.drive_direction(player, (direction or "").strip())
+
+    def drive_direction(self, player, direction):
+        """Drive towards a named exit of the room the vehicle is standing in.
+        Also what a bare direction does when you are aboard (see
+        World.process_player_command)."""
+        room = self.vehicle_room()
+        if room is None:
+            player.tell(self.get_message("drive_fail_not_placed", player))
+            return False
+        if not self.is_aboard(player):
+            player.tell(self.get_message("drive_fail_not_aboard", player))
+            return False
+        name = self.world.exit_names.get(direction, direction).lower()
+        exit = room.exits.get(name)
+        if exit is None:
+            player.tell(self.get_message("drive_fail_no_exit", player))
+            return False
+        return self.drive_through(exit, player)
+
+    def drive_through(self, exit, player):
+        """Take the vehicle (and everything aboard) through *exit*."""
+        if not exit.vehicle_ok(self, player):
+            return False
+        dest = exit.resolve_destination()
+        if dest is None:
+            player.tell(self.get_message("drive_fail_no_exit", player))
+            return False
+
+        room = self.location
+        aboard = self.riders()
+        player.tell(self.get_message("drive", player, exit))
+        for who in aboard:
+            if who is not player:
+                who.tell(self.get_message("drive_others", player, exit))
+        if room is not None:
+            room.announce_all_but(self.get_message("drive_others", player, exit), player)
+
+        self.travel_to(dest)
+
+        dest.announce_all_but(self.get_message("drive_arrive", player, exit), player)
+        # Riders carried along already got the new room from Place.on_enter.
+        # Anyone who stayed put -- a car's passengers, whose location never
+        # changed -- is shown it here instead.
+        for who in aboard:
+            if who.location is not dest:
+                who.tell(dest.look_at(who))
+        self.world.mark_thing_changed(self)
+        return True
+
+    def travel_to(self, dest):
+        """Move the vehicle, bringing whatever is riding on it.
+
+        Nothing to do for an interior: it goes wherever the vehicle goes.  For
+        a positioned rider the location really does change, and move_to drops
+        any position it holds, so the seating has to be taken down and put
+        back up around the move."""
+        seated = []
+        for pos, entries in (getattr(self, "positioned", None) or {}).items():
+            for (thing, verb) in entries:
+                seated.append((thing, pos, verb))
+        self.move_to(dest)
+        for (thing, pos, verb) in seated:
+            thing.move_to(dest)
+            self.add_positioned(thing, pos, verb)
+
+    @make_command(["dismount"], "self")
+    @make_command(["dismount", "off"])
+    def dismount(self, player, prep=None, verb=None):
+        """Get off something you are sitting on."""
+        position = player.find_position()
+        if position is None or position[0] is not self:
+            player.tell(self.get_message("dismount_fail", player))
+            return
+        player._unposition()
+        player.tell(self.get_message("dismount", player))
+        if player.location is not None:
+            player.location.announce_all_but(
+                self.get_message("dismount_others", player), player
+            )
+
+
+class Enterable:
+    """A thing with an inside: it owns a Place of its own that you can step
+    into, and step back out of into wherever the thing itself is.
+
+    Composed with ``Vehicle`` this is a car -- and because the passengers are
+    standing in the interior rather than in the room, the vehicle moving
+    changes nothing about where they are.  On its own it is equally a tent, a
+    lift, or a wardrobe you can climb into.
+    """
+
+    default_messages = {
+        "enter": "You get into {self}.",
+        "enter_others": "{player} gets into {self}.",
+        "enter_fail_location": "{self} is not here.",
+        "enter_fail_inside": "You are already inside {self}.",
+        "leave": "You get out of {self}.",
+        "leave_others": "{player} gets out of {self}.",
+        "leave_arrive": "{player} climbs out of {self}.",
+        "leave_fail_outside": "You are not inside {self}.",
+        "leave_fail_nowhere": "{self} is not anywhere you could get out into.",
+    }
+
+    def __init__(self, id, world, data, recursive=True):
+        super().__init__(id, world, data, recursive)
+        interior = data.get("interior", None)
+        self.interior = world.get_object(interior) if interior else None
+        if self.interior is None:
+            self.interior = self._build_interior(world)
+
+    def _build_interior(self, world):
+        """Give this thing an inside.  Only happens for a freshly created one:
+        anything loaded from the database already carries its interior's id."""
+        from .entities import Interior
+
+        inside = Interior(
+            None,
+            world,
+            {
+                "name": f"inside {self.name}",
+                "description": f"You are inside {self.name}.",
+                "outside": self.id,
+            },
+        )
+        inside._save()
+        return inside
+
+    def to_dict(self):
+        data = super().to_dict()
+        data.update({"interior": self.interior.id if self.interior else None})
+        return data
+
+    def look_at(self, who):
+        desc = super().look_at(who)
+        inside = [x.name for x in (self.interior.contents if self.interior else [])]
+        if inside:
+            return join_look(desc, "Inside is " + ", ".join(inside) + ".")
+        return desc
+
+    def inside_ok(self, player):
+        """May *player* get in?  Override for a locked car, a full lift."""
+        return True
+
+    @make_command(["enter", "board"], "self")
+    @make_command(["get", "climb", "hop"], None, ["in", "into", "inside"], "self")
+    def enter(self, player, prep=None, verb=None):
+        if self.interior is None:
+            player.tell(self.get_message("enter_fail_location", player))
+            return
+        if player.location is self.interior:
+            player.tell(self.get_message("enter_fail_inside", player))
+            return
+        if player.location is not self.location:
+            player.tell(self.get_message("enter_fail_location", player))
+            return
+        if not self.inside_ok(player):
+            return
+        outside = player.location
+        player.tell(self.get_message("enter", player))
+        if outside is not None:
+            outside.announce_all_but(self.get_message("enter_others", player), player)
+        player.move_to(self.interior)
+        self.world.mark_thing_changed(self)
+
+    @make_command(["exit", "leave", "disembark", "alight"], "self")
+    @make_command(["exit", "disembark", "alight", "out"])
+    def leave(self, player, prep=None, verb=None):
+        if self.interior is None or player.location is not self.interior:
+            player.tell(self.get_message("leave_fail_outside", player))
+            return
+        out = self.location
+        if out is None or not hasattr(out, "contents"):
+            player.tell(self.get_message("leave_fail_nowhere", player))
+            return
+        player.tell(self.get_message("leave", player))
+        self.interior.announce_all_but(
+            self.get_message("leave_others", player), player
+        )
+        player.move_to(out)
+        out.announce_all_but(self.get_message("leave_arrive", player), player)
+        self.world.mark_thing_changed(self)

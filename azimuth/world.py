@@ -291,6 +291,11 @@ class World:
         "source",
         "home",
         "last_location",
+        # An Enterable and its Interior point at each other; rebuilding either
+        # would otherwise leave the other talking to the dead instance, and a
+        # car whose interior still names the old car cannot be got out of.
+        "interior",
+        "outside",
     )
 
     def rebuild_instance(self, obj, data):
@@ -391,11 +396,18 @@ class World:
         loc = p.location
         if not isinstance(loc, entities.Place):
             return None
+        # Inside a vehicle, the ways out are the ones the *vehicle* can take.
+        # Without this a driver's panel is empty and there is nothing to click
+        # (Exit.use drives when you are aboard, so clicking one works).
+        ways_out = getattr(loc, "outside_room", None)
+        ways_out = ways_out() if ways_out is not None else None
+        if ways_out is None:
+            ways_out = loc
         return {
             "id": loc.id,
             "name": loc.name,
             "exits": [
-                e.thing_summary(p) for e in loc.exits.values() if p.can_see(e)
+                e.thing_summary(p) for e in ways_out.exits.values() if p.can_see(e)
             ],
             "things": [
                 x.thing_summary(p)
@@ -719,20 +731,49 @@ class World:
         elif w1 == "eval":
             player.eval(argstr[5:].strip())
         elif argstr in self.exit_names.values():
-            exit = player.location.exits.get(argstr, None)
-            if exit is not None:
-                exit.use(player)
+            # Riding something?  A bare direction drives it.  You don't step
+            # off the bicycle to walk north, and a car's interior has no exits
+            # of its own to walk through in the first place.
+            vehicle = player.current_vehicle()
+            if vehicle is not None:
+                vehicle.drive_direction(player, argstr)
             else:
-                player.tell("There is no such exit here")
+                exit = player.location.exits.get(argstr, None)
+                if exit is not None:
+                    exit.use(player)
+                else:
+                    player.tell("There is no such exit here")
         else:
             argstr = argstr.replace(w1, "", 1).strip()
 
+            # The vehicle you are riding comes first among the objects: it
+            # puts a car within reach from inside (it is in the room, not in
+            # the interior you are standing in), and it makes `drive north`
+            # reach *your* vehicle rather than whichever one is parked
+            # nearest.
+            vehicle = player.current_vehicle()
+            here = player.location
+            # Inside a vehicle, what is out of the window is addressable too:
+            # its exits (so `go north` and a panel click drive the vehicle
+            # through them) and its contents (so you can look at what you are
+            # driving past).  Reaching is still gated by okay_for_verb, which
+            # compares locations -- you cannot pick up a kerbstone from the
+            # driving seat.
+            outside_room = getattr(here, "outside_room", None)
+            outside_room = outside_room() if outside_room is not None else None
+            beyond = (
+                [*outside_room.contents, *outside_room.exits.values()]
+                if outside_room is not None
+                else []
+            )
             search_order = [
                 player,
-                player.location,
+                here,
+                *([vehicle] if vehicle is not None else []),
                 *player.contents,
-                *player.location.contents,
-                *player.location.exits.values(),
+                *here.contents,
+                *here.exits.values(),
+                *beyond,
                 self,
             ]
 

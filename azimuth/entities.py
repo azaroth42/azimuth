@@ -7,13 +7,18 @@ from werkzeug.security import check_password_hash
 
 from azimuth.command_decorator import make_command
 from azimuth.mixins import (
+    VEHICLE_LARGE,
+    VEHICLE_SMALL,
     Containable,
+    Enterable,
     Holdable,
     Lockable,
     Openable,
     Positionable,
     Switchable,
+    Vehicle,
     Wearable,
+    join_look,
 )
 
 
@@ -478,6 +483,44 @@ class Place(BaseThing):
         return data
 
 
+class Interior(Place):
+    """A Place that is the *inside* of something (see the Enterable mixin).
+
+    It has no exits of its own -- you leave by getting out of the thing it
+    belongs to -- and it never moves, which is exactly the point: when a car
+    drives away its interior goes along at no cost, so the passengers standing
+    in it never change location and nothing has to be carried.
+    """
+
+    def __init__(self, id, world, data, recursive=True):
+        super().__init__(id, world, data, recursive)
+        outside = data.get("outside", None)
+        # The owning thing is already registered by the time this runs (its
+        # BaseThing.__init__ ran first), so the cycle resolves either way
+        # round -- whichever of the two the database happens to load first.
+        self.outside = world.get_object(outside) if outside else None
+
+    def outside_room(self):
+        """The Place the owning thing is standing in, if any."""
+        where = self.outside.location if self.outside else None
+        return where if hasattr(where, "exits") else None
+
+    def look_at(self, who):
+        desc = super().look_at(who)
+        where = self.outside_room()
+        if where is None:
+            return desc
+        lines = [f"Outside you can see {where.name}."]
+        if where.exits:
+            lines.append(f"Ways out: {', '.join(sorted(where.exits))}.")
+        return join_look(desc, *lines)
+
+    def to_dict(self):
+        data = super().to_dict()
+        data.update({"outside": self.outside.id if self.outside else None})
+        return data
+
+
 # --- Exit Class ---
 class Exit(BaseThing):
     """Represents a transition between two Places."""
@@ -490,10 +533,18 @@ class Exit(BaseThing):
         "arrive_others": "{player} has arrived",
     }
 
+    # The largest vehicle that fits through.  A plain exit is a road, an
+    # archway, a gap in the hedge: anything goes.  See OpenableExit for why a
+    # door is narrower, and VEHICLE_NONE to bar vehicles outright.
+    default_max_vehicle_size = VEHICLE_LARGE
+
     def __init__(self, id, world, data, recursive=True):
         self.source = None
         self.destination = None
         super().__init__(id, world, data, recursive)
+        self.max_vehicle_size = data.get(
+            "max_vehicle_size", self.default_max_vehicle_size
+        )
         src = world.get_object(data["source"])
         if src is not None:
             self.source = src
@@ -507,24 +558,57 @@ class Exit(BaseThing):
                 self.destination = dest
                 dest.add_entrance(self)
 
+    def resolve_destination(self):
+        """The Place on the far side, loading it if it is still just an id.
+
+        Destinations load lazily (Exit.__init__ with recursive=False leaves a
+        bare id), so everything that travels -- players walking, vehicles
+        being driven -- has to go through here rather than read the attribute.
+        """
+        dest = self.destination
+        if type(dest) is str:
+            dest = self.world.get_object(dest)
+            if dest is not None:
+                self.destination = dest
+        return dest
+
+    def vehicle_ok(self, vehicle, player):
+        """May *vehicle* be driven through here?  Tells the player why not.
+
+        Size is the gate, so the rule reads the way the world does: a car does
+        not fit through a front door, a bicycle does, and a garage door is
+        simply a door with `max_vehicle_size` set wide.
+        """
+        if getattr(self, "is_open", True) is False:
+            player.tell(vehicle.get_message("drive_fail_closed", player, self))
+            return False
+        if vehicle.vehicle_size > self.max_vehicle_size:
+            player.tell(vehicle.get_message("drive_fail_size", player, self))
+            return False
+        return True
+
     @make_command(["go", "walk"], "self")
     @make_command(["go", "walk"], None, ["through"], "self")
     def use(self, player, prep=None, verb=None):
-        """Moves a player through the exit to the destination."""
+        """Moves a player through the exit to the destination.
+
+        Aboard a vehicle this drives the vehicle through instead -- `go north`
+        and a click on the exit in a client's panel mean the same thing as
+        `drive north` when you are the one at the wheel.  Get off first if you
+        want to leave the vehicle behind.
+        """
+        vehicle = player.current_vehicle()
+        if vehicle is not None:
+            return vehicle.drive_through(self, player)
         if not player.location == self.source:
             player.tell(self.get_message("leave_fail_location", player))
         elif self.destination is None:
             player.tell(self.get_message("leave_fail_destination", player))
         else:
-            dest = self.destination
-            # Load up the next room
-            if type(dest) is str:
-                dest = self.world.get_object(dest)
-                if dest is None:
-                    player.tell(self.get_message("leave_fail_destination", player))
-                    return
-                else:
-                    self.destination = dest
+            dest = self.resolve_destination()
+            if dest is None:
+                player.tell(self.get_message("leave_fail_destination", player))
+                return
 
             player.tell(self.get_message("leave", player))
             player.move_to(dest)
@@ -542,6 +626,7 @@ class Exit(BaseThing):
         data.update(
             {
                 "source": self.source.id if self.source else None,
+                "max_vehicle_size": self.max_vehicle_size,
             }
         )
         if type(self.destination) is str:
@@ -562,6 +647,11 @@ class OpenableExit(Openable, Exit):
     no hand-spliced look_at.  Only the genuinely Exit-specific behaviour below
     (a closed door blocks travel; open/close carry across to the far side)
     lives here, which is why this class still exists at all."""
+
+    # A doorway you can wheel a bicycle through but not drive a car through.
+    # A garage door is this class with `max_vehicle_size` set to VEHICLE_LARGE
+    # in its data -- no separate class needed.
+    default_max_vehicle_size = VEHICLE_SMALL
 
     default_messages = {
         "go_fail_closed": "You cannot go through that, it's closed.",
@@ -637,7 +727,6 @@ class Object(BaseThing):
             return False
         if verb in ["get", "take", "pick"]:
             if self.location != player.location:
-                print("failed match for location")
                 return False
         elif verb == "drop":
             if self.location != player:
@@ -869,6 +958,21 @@ class Player(BaseThing):
             desc += f"\n{subj} are {where}."
         return desc
 
+    def current_vehicle(self):
+        """The vehicle this player is riding, or None.
+
+        Either they are standing in its interior (a car) or sitting on it (a
+        bike).  The dispatcher puts this first among the objects it offers a
+        command to, which is what makes `drive north` reach *your* vehicle
+        rather than whichever one happens to be parked nearest."""
+        outside = getattr(self.location, "outside", None)
+        if isinstance(outside, Vehicle):
+            return outside
+        position = self.find_position()
+        if position is not None and isinstance(position[0], Vehicle):
+            return position[0]
+        return None
+
     def _carry_mode(self, item):
         """How an item in this inventory is carried: 'held', 'worn', or plain
         'carried'.  Derived from the item's state (Holdable/Wearable)."""
@@ -888,10 +992,20 @@ class Player(BaseThing):
     def can_see(self, what):
         if what.location == self.location or what.location == self:
             return True
-        elif isinstance(what, Exit) and what.source == self.location:
+        if isinstance(what, Exit) and what.source == self.location:
             return True
-        else:
-            return False
+        # Riding something has windows: from inside a car you can see the
+        # street it is parked in, what is in it, and the ways out of it --
+        # otherwise a driver could not even look at their own car, and the
+        # exits they are about to drive through would be invisible.
+        vehicle = self.current_vehicle()
+        if vehicle is not None:
+            outside = vehicle.location
+            if what is vehicle or what.location == outside:
+                return True
+            if isinstance(what, Exit) and what.source == outside:
+                return True
+        return False
 
     def my_match_object(self, name):
         if name in ["me", "myself"]:
@@ -899,10 +1013,16 @@ class Player(BaseThing):
         elif name == "here":
             return self.location
         else:
+            # The vehicle you are riding is referenceable by name even though
+            # it is not in the room with you -- from inside a car, the car is
+            # in the street outside.  Same reasoning as the dispatcher's
+            # search order (World.process_player_command).
+            vehicle = self.current_vehicle()
             for x in [
                 *self.contents,
                 *self.location.contents,
                 *self.location.exits.values(),
+                *([vehicle] if vehicle is not None else []),
             ]:
                 if x.match_object(name, self):
                     return x
@@ -1376,8 +1496,12 @@ class Programmer(Player):
         elif not new_class:
             player.tell("You need to specify a new class.")
         else:
-            # directly change the class
-            nc = self.world.import_class(new_class)
+            # Through the factory, not import_class: a composed class
+            # (PositionableVehicleObject, ...) has no module to import from.
+            try:
+                nc = self.world.compose(new_class)
+            except Exception:
+                nc = None
             if nc is not None:
                 obj = nc(None, self.world, {"name": what}, recursive=False)
                 obj.move_to(player)

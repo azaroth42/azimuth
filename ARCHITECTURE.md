@@ -27,7 +27,7 @@ as a "vibe coding" experiment and grown into a working engine with an AI layer:
 
 ### State as of writing
 
-- Tests: **107/107 passing** on the file backend (`python run-tests.py`) and on
+- Tests: **136/136 passing** on the file backend (`python run-tests.py`) and on
   sqlite (`python run-tests.py --db sqlite`) — game logic, storage contract
   (run against *both* backends in-process), the out-of-band state channel, and
   class composition (`tests/test_compose.py`).
@@ -44,7 +44,7 @@ as a "vibe coding" experiment and grown into a working engine with an AI layer:
 | `azimuth/world.py` | `World` class: object cache, lazy loading, login/register, **the command dispatcher**, `setup_world` bootstrap |
 | `azimuth/command_decorator.py` | `@make_command` decorator + global `commands` registry |
 | `azimuth/entities.py` | `BaseThing`/`Place`/`Exit`/`Object`/`Player`/`Programmer` + the hand-written base+mixin combinations (`Container`, `OpenableContainer`, `PositionableObject`, `WearableObject`, `SwitchableObject`, `HeldObject`, `OpenableExit`, `LockableExit`) and `EdibleThing` |
-| `azimuth/mixins.py` | Capability mixins: `StateToggle`→`Openable`/`Lockable`/`Switchable`, `Containable`, `Positionable`, `Holdable`, `Wearable`. All **cooperative**: each chains `super()` in `__init__`/`to_dict`/`look_at`/`state_summary` |
+| `azimuth/mixins.py` | Capability mixins: `StateToggle`→`Openable`/`Lockable`/`Switchable`, `Containable`, `Positionable`, `Holdable`, `Wearable`, `Vehicle`, `Enterable`. All **cooperative**: each chains `super()` in `__init__`/`to_dict`/`look_at`/`state_summary` |
 | `azimuth/classfactory.py` | base + mixins → class (`CANON` names, normalization, `type()` synthesis, eager build at init); stored-verb compilation |
 | `azimuth/persistence.py` | `Storage` ABC, `SimpleFileStorage` (default), `SqliteStorage`, `MlStorage` (MarkLogic) |
 | `azimuth/agents/` | `RoomBuilderAgent` (in-process LLM world-builder), `config.py` (env-driven config + system prompts) |
@@ -71,7 +71,7 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
 # 3. Verify
-.venv/bin/python run-tests.py      # expect 107/107 passed (add --db sqlite for the sqlite backend)
+.venv/bin/python run-tests.py      # expect 136/136 passed (add --db sqlite for the sqlite backend)
 
 # 4. Run
 .venv/bin/python run.py            # server on 0.0.0.0:5001
@@ -201,6 +201,7 @@ merge pattern here — the message semantics are already correct.
 ```
 BaseThing  (uuid, location/contents graph, move_to, look_at, messages, match_object, get_commands)
 ├── Place   (exits dict keyed by exit name, coordinates, room look/announce)
+│   ├── Interior  — the inside of an Enterable; see §6.2.3
 │   └── (rooms created by setup_world / agent / @dig)
 ├── Exit    (source/destination, use() = move + announces; lazy destination)
 │   ├── OpenableExit   (Openable, Exit) — closed blocks travel; announces across
@@ -213,6 +214,9 @@ BaseThing  (uuid, location/contents graph, move_to, look_at, messages, match_obj
 │   ├── SwitchableObject     (Switchable, Object)
 │   ├── HeldObject           (Holdable, Object)     — wield/unwield
 │   └── EdibleThing          (Object)               — eat, destroy
+(composed at runtime, no class in the codebase:
+     PositionableVehicleObject — a bike you sit on
+     EnterableVehicleObject    — a car you sit in)
 └── Player  (connection sid, username, password_hash, last_location, home,
     │        say/emote/whisper(stub)/who/@quit/@desc/@home/@sethome/inv)
     └── Programmer  (eval with #refs, @dig, @create, @chparent, @rename,
@@ -289,6 +293,51 @@ mixin name into one error at boot instead of a mystery hours later. Lazy
 resolution in `make_instance` remains the backstop for combinations invented
 after startup. Backends that cannot enumerate (`DictStorage`, `MlStorage` —
 neither has `iter_ids`) skip the eager pass and rely on it.
+
+### 6.2.3 Vehicles
+
+A vehicle is a room-bound thing you ride and can drive through exits. It is
+**two mixins, no new entity class** — the first thing built entirely on the
+composition machinery:
+
+| | mixins | riding |
+|---|---|---|
+| bicycle | `Positionable` + `Vehicle` | you sit **on** it; riders keep their own location |
+| car | `Enterable` + `Vehicle` | you sit **in** it; riders stand in the vehicle's own `Interior` |
+
+`Vehicle` supplies `take_ok → False`, size, `drive`/`dismount`, and the travel
+itself; which kind of riding is in play is read off the sibling mixin's own
+state (`positioned` / `interior`), the same duck-typing `Containable.look_at`
+uses to notice an `is_open`.
+
+**The interior is the point of the car.** `Enterable` owns a `Interior`
+(a `Place`), and a passenger standing in it does not move when the car does —
+so `travel_to` has nothing to carry. A *bicycle's* rider really does change
+location, and `move_to` drops any position a thing holds, so the seating is
+taken down and put back up around the move (`tests/test_vehicles.py` pins
+this: without it you arrive standing beside the bike).
+
+**Which exits take which vehicle** is a size gate, so the rule reads the way
+the world does. Every `Exit` has `max_vehicle_size`; a plain exit (a road, an
+archway) is `VEHICLE_LARGE`, an `OpenableExit` is `VEHICLE_SMALL` — a doorway
+you can wheel a bike through but not drive a car through. **A garage door is
+that same class with `max_vehicle_size` set wide**, not a new class.
+`VEHICLE_NONE` bars vehicles outright. A closed door still stops everything.
+
+**Riding changes three lookups**, all for the same reason — from inside a car,
+the car is in the street, not in the room you are standing in:
+
+- `Player.can_see` — you can see the street, its contents and its exits
+  (a car has windows);
+- `Player.my_match_object` and the dispatcher's search order — your vehicle
+  and what is outside it are addressable, with `okay_for_verb` still gating
+  what you can *do* (you cannot pick up a kerbstone from the driving seat);
+- `World.state_room` — the OOB room section reports the *vehicle's* ways out,
+  so a driver's panel has something to click.
+
+`Exit.use` drives when you are aboard, so `go north`, a bare `north`, and a
+click on the exit in a client's panel all mean the same thing. Get off first
+if you want to leave the vehicle behind.
 
 ### 6.2.2 Stored verbs
 
@@ -454,8 +503,6 @@ either rewrite or delete it.
   `clss` filter matches the stored *base* only; the mixin half is applied
   locally to whatever comes back. Indexing `mixins` would fix it properly if
   that backend comes back into use.
-- **Debug print left behind**: `Object.okay_for_verb` in entities.py still has
-  `print("failed match for location")` — safe to remove.
 - **`--reload` watches `db/` and `.venv/`** — expect server restarts when those
   change; consider narrowing uvicorn's watch dirs in `run.py`.
 

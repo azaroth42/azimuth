@@ -38,11 +38,13 @@ import logging
 from . import entities
 from .mixins import (
     Containable,
+    Enterable,
     Holdable,
     Lockable,
     Openable,
     Positionable,
     Switchable,
+    Vehicle,
     Wearable,
 )
 
@@ -53,11 +55,13 @@ logger = logging.getLogger(__name__)
 # arbitrary importable name would be an arbitrary-base-class injection.
 MIXINS = {
     "Containable": Containable,
+    "Enterable": Enterable,
     "Holdable": Holdable,
     "Lockable": Lockable,
     "Openable": Openable,
     "Positionable": Positionable,
     "Switchable": Switchable,
+    "Vehicle": Vehicle,
     "Wearable": Wearable,
 }
 
@@ -189,9 +193,9 @@ class ClassFactory:
         mixins = data.get("mixins")
         if mixins:
             return self.resolve(name, mixins)
-        legacy = LEGACY.get(name.rsplit(".", 1)[-1])
-        if legacy is not None:
-            return self.resolve(*legacy)
+        (base, named) = self.split_name(name)
+        if named:
+            return self.resolve(base, named)
         return self.world.import_class(name)
 
     # --- building --------------------------------------------------------
@@ -294,11 +298,38 @@ class ClassFactory:
         return sorted(MIXINS)
 
     def split_name(self, name):
-        """A class name -> (base, mixins).  A hand-written composite expands
-        into the combination it stands for, so `@chparent thing to Container`
-        and `@addmixin thing to Containable` land on the same class."""
-        legacy = LEGACY.get(name.rsplit(".", 1)[-1])
-        return legacy if legacy is not None else (name, ())
+        """A class name -> (base, mixins).
+
+        Three forms resolve, so a composed class can be *named* anywhere a
+        class name is accepted -- `@create ... as`, `@chparent`, an agent
+        prompt, a hand-written db record:
+
+        * a hand-written composite (``Container``) expands into the
+          combination it stands for, so `@chparent thing to Container` and
+          `@addmixin Containable to thing` land on the same class;
+        * a generated name (``PositionableVehicleObject``) is parsed back by
+          peeling known mixin names off the front -- it is the canonical
+          identity of that combination, so it has to round-trip;
+        * anything else is a plain base with no mixins.
+        """
+        short = name.rsplit(".", 1)[-1]
+        legacy = LEGACY.get(short)
+        if legacy is not None:
+            return legacy
+        rest, found = short, []
+        while rest:
+            # Longest first: no mixin name is a prefix of another today, but
+            # relying on that silently would be a trap for the next one added.
+            for m in sorted(MIXINS, key=len, reverse=True):
+                if rest.startswith(m) and rest != m:
+                    found.append(m)
+                    rest = rest[len(m):]
+                    break
+            else:
+                break
+        if found and rest:
+            return (rest, normalize(found))
+        return (name, ())
 
     def combine(self, current, add=(), remove=()):
         """The normalized mixin tuple after adding/removing names.

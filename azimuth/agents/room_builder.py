@@ -14,10 +14,12 @@ The agent can:
 import json
 import logging
 import requests
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from .config import AgentConfig, SYSTEM_PROMPTS
 
-from ..entities import Place, Exit, OpenableExit, Object, Furniture, Clothing, HeldObject, Container
+from ..entities import (Place, Exit, OpenableExit, Object, PositionableObject,
+    WearableObject, HeldObject, Container)
+from ..world import World
 
 
 # Configure logging
@@ -26,7 +28,10 @@ logger = logging.getLogger(__name__)
 
 
 class RoomBuilderAgent:
-    def __init__(self, world, config: AgentConfig = None):
+    world: Any
+    player: Any
+
+    def __init__(self, world: "World | None" = None, config: AgentConfig | None = None):
         """Initialize the Room Builder Agent."""
         self.config = config or AgentConfig.from_env()
 
@@ -46,22 +51,25 @@ class RoomBuilderAgent:
         self.object_class_hash = {
             "Container": Container,
             "HeldObject": HeldObject,
-            "Clothing": Clothing,
+            "WearableObject": WearableObject,
             "Food": None,
-            "Furniture": Furniture,
+            "PositionableObject": PositionableObject,
             "Item": Object,
         }
 
         self.world = world
-        self.player = world.load(world.players["wizard"])
-        start = self.player.last_location
-        if not start:
-            start = world.config["start_room_id"]
-        sloc = world.load(start)
-        if isinstance(sloc, Place):
-            self.player.move_to(sloc)
+        if world is not None:
+            self.player = self.world.load(self.world.players["wizard"])
+            start = self.player.last_location
+            if not start:
+                start = self.world.config["start_room_id"]
+            sloc = self.world.load(start)
+            if isinstance(sloc, Place):
+                self.player.move_to(sloc)
+            else:
+                print("Could not move player into the world, as start/last_loc is not a Place")
         else:
-            print("Could not move player into the world, as start/last_loc is not a Place")
+            self.player = None
 
     def test_lm_studio_connection(self) -> bool:
         """Test connection to LM Studio."""

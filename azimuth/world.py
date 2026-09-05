@@ -3,6 +3,7 @@ import copy
 import functools
 import importlib
 import logging
+import re
 import time
 
 from rich import print
@@ -38,6 +39,13 @@ class World:
             "fail_command_match": "I don't understand that.",
         }
         self.socketio = None  # Will be injected by main.py
+
+        # Out-of-band state channel (see OOB-PROTOCOL.md)
+        self.oob_sids = set()   # sids that hello'd OOB capability over `data`
+        self.state_dirty = {}   # player_id -> set of section names to re-check
+        self.state_last = {}    # player_id -> last sections actually sent
+        self._state_seq = {}    # sid -> monotonically increasing seq counter
+        self._last_resync = {}  # sid -> monotonic time of last resync
 
         self.exit_names = {
             "n": "north",
@@ -180,6 +188,8 @@ class World:
 
     def emit(self, event, data, to=None):
         # Simple emit - handle async in background
+        if self.socketio is None:
+            return
         func = functools.partial(self.socketio.emit, event, data, to)
         self.call_async_partial(func)
 
@@ -191,6 +201,165 @@ class World:
     def disconnect_player(self, who):
         func = functools.partial(self.socketio.disconnect, who.connection)
         self.call_async_partial(func)
+
+    # ------------------------------------------------------------------
+    # Out-of-band state channel (see OOB-PROTOCOL.md)
+    #
+    # Sections: room / inventory / players.  Mutations mark sections dirty
+    # (conservatively); flush_state() recomputes, diffs against the last
+    # sent snapshot, and emits one coalesced `state` event per affected
+    # player.  Only clients that hello'd OOB capability (oob_sids) receive
+    # any of it.
+    # ------------------------------------------------------------------
+
+    def state_self(self, p):
+        s = {
+            "id": p.id,
+            "name": p.name,
+            "username": p.username,
+            "verbs": p.verbs_summary(p, include_argless=True),
+        }
+        pos = p.find_position()
+        if pos is not None:
+            parent, ppos, verb = pos
+            s["position"] = (
+                f"{parent.posture_ing(verb)} " if verb else ""
+            ) + f"{ppos} the {parent.name}"
+        return s
+
+    def state_room(self, p):
+        loc = p.location
+        if not isinstance(loc, entities.Place):
+            return None
+        return {
+            "id": loc.id,
+            "name": loc.name,
+            "exits": [
+                e.thing_summary(p) for e in loc.exits.values() if p.can_see(e)
+            ],
+            "things": [
+                x.thing_summary(p)
+                for x in loc.contents
+                if x is not p and p.can_see(x)
+            ],
+        }
+
+    def state_inventory(self, p):
+        return [x.thing_summary(p) for x in p.contents if p.can_see(x)]
+
+    def state_players(self, viewer):
+        out = []
+        for pid in self.active_sids.values():
+            pl = self.active_objects.get(pid)
+            if pl is None:
+                continue
+            loc = pl.location
+            out.append(
+                {
+                    "id": pl.id,
+                    "name": pl.name,
+                    "loc": loc.name if isinstance(loc, entities.Place) else None,
+                    "seen": int(pl.last_active_time),
+                    "self": pl is viewer,
+                }
+            )
+        return out
+
+    # --- dirty marking (superset is fine: the diff at flush time is exact) ---
+
+    def mark_room_dirty(self, place):
+        if place is None:
+            return
+        for c in place.contents:
+            if isinstance(c, entities.Player) and c.connection:
+                self.state_dirty.setdefault(c.id, set()).add("room")
+
+    def mark_inventory_dirty(self, player):
+        if player is not None and player.connection:
+            self.state_dirty.setdefault(player.id, set()).add("inventory")
+
+    def mark_players_dirty(self):
+        for pid in self.active_sids.values():
+            self.state_dirty.setdefault(pid, set()).add("players")
+
+    def mark_moved(self, thing, old, new):
+        for loc in (old, new):
+            if isinstance(loc, entities.Place):
+                self.mark_room_dirty(loc)
+            elif isinstance(loc, entities.Player):
+                self.mark_inventory_dirty(loc)
+        if isinstance(thing, entities.Player):
+            self.mark_players_dirty()
+
+    def mark_thing_changed(self, thing):
+        if isinstance(thing, entities.Exit):
+            if thing.source is not None:
+                self.mark_room_dirty(thing.source)
+            return
+        loc = thing.location
+        if isinstance(loc, entities.Place):
+            self.mark_room_dirty(loc)
+        elif isinstance(loc, entities.Player):
+            self.mark_inventory_dirty(loc)
+            # A thing's held/worn state also shows in the holder's summary,
+            # which other players see as part of the room; mark the room too
+            # so they refresh (superset is fine -- the flush diff is exact).
+            room = loc.location
+            if isinstance(room, entities.Place):
+                self.mark_room_dirty(room)
+
+    # --- emission ---
+
+    def _next_seq(self, sid):
+        n = self._state_seq.get(sid, 0) + 1
+        self._state_seq[sid] = n
+        return n
+
+    def push_init(self, player):
+        """Full snapshot (kind=init) to a player, if their client is OOB."""
+        sid = player.connection
+        if not sid or sid not in self.oob_sids:
+            return
+        payload = {
+            "v": 1,
+            "kind": "init",
+            "seq": self._next_seq(sid),
+            "self": self.state_self(player),
+            "room": self.state_room(player),
+            "inventory": self.state_inventory(player),
+            "players": self.state_players(player),
+        }
+        self.state_last[player.id] = {
+            "room": payload["room"],
+            "inventory": payload["inventory"],
+            "players": payload["players"],
+        }
+        self.emit("state", payload, to=sid)
+
+    def flush_state(self):
+        """Recompute every marked section; emit one update per player that
+        actually changed.  Safe to call when nothing is dirty."""
+        if not self.state_dirty:
+            return
+        for pid, sections in self.state_dirty.items():
+            p = self.active_objects.get(pid)
+            sid = p.connection if p is not None else None
+            if not sid or sid not in self.oob_sids:
+                continue
+            last = self.state_last.setdefault(pid, {})
+            payload = {"v": 1, "kind": "update", "seq": self._next_seq(sid)}
+            changed = False
+            for name in sections:
+                fresh = getattr(self, f"state_{name}")(p)
+                if fresh is None:
+                    continue
+                if fresh != last.get(name):
+                    payload[name] = fresh
+                    last[name] = fresh
+                    changed = True
+            if changed:
+                self.emit("state", payload, to=sid)
+        self.state_dirty.clear()
 
     def handle_register(self, sid, data):
         """Handles player registration."""
@@ -285,6 +454,9 @@ class World:
             where = self.get_object(where)
         player.move_to(where)
         player.tell(f"Welcome back, {player.name}!")
+        self.push_init(player)
+        self.mark_players_dirty()
+        self.flush_state()
 
     def on_disconnect(self, sid):
         player_id = self.active_sids.get(sid)  # Find player ID from active session map
@@ -301,11 +473,16 @@ class World:
         del self.active_objects[player_id]
         player._save()
 
+        # OOB: the world just changed for everyone who was watching it.
+        self.oob_sids.discard(sid)
+        self._state_seq.pop(sid, None)
+        self.mark_players_dirty()
+        self.flush_state()
+
     def process_player_command(self, player_id, argstr):
         player = self.active_objects.get(player_id, None)
         if player is None:
             # ????!
-            print(f"Got no player for id {player_id}")
             return
 
         player.last_active_time = time.time()
@@ -347,10 +524,15 @@ class World:
             ]
 
             for s in search_order:
-                print(f"Command search on {s}")
                 cmds = s.get_commands(w1)
-                for c in cmds.get(w1, []):
-                    print(f"Found: {c}")
+                # Try entries deepest-first: get_commands merges class commands
+                # shallowest-ancestor-first, and the first structural match
+                # wins, so the list must be walked in reverse. Otherwise a
+                # generic ancestor handler (e.g. Exit.use, Openable.open) runs
+                # before the specialized override (OpenableExit.use's closed
+                # check, Lockable.open's lock check) -- a locked door would
+                # open, and a closed door would be walkable.
+                for c in reversed(cmds.get(w1, [])):
                     if len(words) == 1 and not any([c["dobj"], c["prep"], c["iobj"]]):
                         c["func"](s, player, prep=None, verb=w1)
                         return
@@ -358,52 +540,53 @@ class World:
                         continue
                     elif c["prep"] is not None:
                         for p in c["prep"]:
-                            if p in argstr:
-                                # Ensure put gong on long bong splits sanely
-                                bits = argstr.split(f" {p} ")
-                                if len(bits) == 2:
-                                    (d, i) = bits
-                                else:
-                                    print(bits)
-                                    player.tell(f"yuck: {bits}")
-                                    return
-                                d = d.strip()
-                                i = i.strip()
-                                if (not c["dobj"] and d) or (c["dobj"] and not d):
-                                    continue
-                                elif (not c["iobj"] and i) or (c["iobj"] and not i):
-                                    continue
-                                else:
-                                    if s == player:
-                                        # allow any * any
-                                        if (
-                                            c["dobj"] == "any"
-                                            and d
-                                            and c["iobj"] == "any"
-                                            and i
-                                        ):
-                                            c["func"](s, player, d, i, prep=p, verb=w1)
+                            # Split on the preposition as a whole word, so
+                            # 'put gong on long bong' splits sanely AND a
+                            # preposition that leads the arguments
+                            # ('look at wizard' -> 'at wizard') is handled.
+                            bits = re.split(
+                                r"(?:^|\s+)" + re.escape(p) + r"(?:\s+|$)",
+                                argstr,
+                            )
+                            if len(bits) != 2:
+                                continue
+                            (d, i) = bits
+                            d = d.strip()
+                            i = i.strip()
+                            if (not c["dobj"] and d) or (c["dobj"] and not d):
+                                continue
+                            elif (not c["iobj"] and i) or (c["iobj"] and not i):
+                                continue
+                            else:
+                                if s == player:
+                                    # allow any * any
+                                    if (
+                                        c["dobj"] == "any"
+                                        and d
+                                        and c["iobj"] == "any"
+                                        and i
+                                    ):
+                                        c["func"](s, player, d, i, prep=p, verb=w1)
+                                        return
+                                if c["dobj"] == "self":
+                                    if not s.match_object(d, player):
+                                        continue
+                                    else:
+                                        c["func"](s, player, i, prep=p, verb=w1)
+                                        return
+                                if c["iobj"] == "self":
+                                    if not s.match_object(i, player):
+                                        continue
+                                    else:
+                                        if not d:
+                                            c["func"](s, player, prep=p, verb=w1)
                                             return
-                                    if c["dobj"] == "self":
-                                        if not s.match_object(d, player):
-                                            continue
                                         else:
-                                            c["func"](s, player, i, prep=p, verb=w1)
+                                            c["func"](s, player, d, prep=p, verb=w1)
                                             return
-                                    if c["iobj"] == "self":
-                                        if not s.match_object(i, player):
-                                            continue
-                                        else:
-                                            if not d:
-                                                c["func"](s, player, prep=p, verb=w1)
-                                                return
-                                            else:
-                                                c["func"](s, player, d, prep=p, verb=w1)
-                                                return
                     else:
                         # no prep, so no iobj
                         # and also not none ... so must be dobj
-                        print(s.match_object(argstr, player, verb=w1))
                         if c["dobj"] == "self" and s.match_object(
                             argstr, player, verb=w1
                         ):
@@ -441,13 +624,14 @@ def setup_world(db, world_id):
         # main data fields: name, description, location, contents
 
         from .entities import (
-            Clothing,
             Container,
+            EdibleThing,
             Exit,
             HeldObject,
             Object,
             Place,
             Programmer,
+            WearableObject,
         )
 
         # Places - Keep track of IDs for linking
@@ -501,7 +685,7 @@ def setup_world(db, world_id):
                 "location": start_room.id,
             },
         )
-        armor = Clothing(
+        armor = WearableObject(
             None,
             world,
             {
@@ -520,7 +704,7 @@ def setup_world(db, world_id):
                 "location": hallway.id,
             },
         )
-        bread = Object(
+        bread = EdibleThing(
             None,
             world,
             {

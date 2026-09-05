@@ -14,20 +14,26 @@ The design goals that fell out of that:
   object's class can even be *reassigned at runtime* via `@chparent`.
 - **A MOO-style programmer tier** — a `Programmer` player gets `eval`, `@create`,
   `@dig`, `@message` and friends for building and editing the world from inside the MUD.
-- **AI-native** — the world is exposed over MCP so LLM agents can inspect it, and an
-  LLM-driven Room Builder agent can generate whole environments from a single sentence.
+- **AI-native** — an LLM-driven Room Builder agent can generate whole environments
+  from a single sentence; an MCP mount for agent inspection is present but
+  currently disabled (see below).
+
+**Deep-dive:** [ARCHITECTURE.md](ARCHITECTURE.md) documents the subsystems, the
+current state, the known bugs, and how to set up on a new machine. Start there
+before making non-trivial changes.
 
 ## Architecture
 
 | Component | File | Role |
 |---|---|---|
-| Server | [azimuth/main.py](azimuth/main.py) | FastAPI + Socket.IO ASGI app, plus MCP |
+| Server | [azimuth/main.py](azimuth/main.py) | FastAPI + Socket.IO ASGI app (MCP mount currently disabled) |
 | World engine | [azimuth/world.py](azimuth/world.py) | Object cache, lazy loading, login, command dispatch |
 | Command system | [azimuth/command_decorator.py](azimuth/command_decorator.py) | `@make_command` registration and resolution |
 | Object model | [azimuth/entities.py](azimuth/entities.py), [azimuth/mixins.py](azimuth/mixins.py) | `Place`/`Exit`/`Object`/`Player` + capability mixins |
-| Persistence | [azimuth/persistence.py](azimuth/persistence.py) | JSON-file or MarkLogic backends |
+| Persistence | [azimuth/persistence.py](azimuth/persistence.py) | file, SQLite, or MarkLogic backends |
 | AI agents | [azimuth/agents/](azimuth/agents/) | LLM room builder (in-process) |
 | Text client | [client.py](client.py) | Socket.IO + prompt_toolkit terminal client |
+| TUI client | [tui_client.py](tui_client.py) | Textual terminal client (status bar, live room panel, completion) |
 | Web client | [azimuth/templates/index.html](azimuth/templates/index.html) | Browser terminal at `/` |
 
 **Server.** FastAPI wrapped in a `socketio.ASGIApp`, served with uvicorn. It exposes
@@ -36,9 +42,12 @@ three surfaces:
 1. **Socket.IO** — real-time player I/O (`connect` sends the MOTD + login prompt;
    `command` dispatches to the world; `disconnect` persists the player's location).
 2. **Web client** — `GET /` serves a terminal-style browser client.
-3. **MCP** — `fastapi_mcp` is mounted, exposing `GET /data/{id}` (`get_record`) and
-   `GET /search/{name}` (`search_record`) as MCP tools so AI agents can look up
-   world objects by UUID or name. (This is why the server moved from Flask to FastAPI.)
+3. **MCP — currently disabled** — the `FastApiMCP(...)` / `mcp.mount()` lines in
+   `main.py` are commented out; re-enabling is two uncomments. (This is why the
+   server moved from Flask to FastAPI.) `requirements.txt` pins `mcp<2` because
+   fastapi-mcp 0.4.x is incompatible with the mcp 2.x `Server()` signature. The
+   underlying REST endpoints (`GET /data/{id}`, `GET /search/{name}`) still work
+   standalone.
 
 **World.** `World` keeps an in-memory cache of active objects and lazily loads the
 rest from the persistence layer. On first start it bootstraps a demo world (three
@@ -65,24 +74,49 @@ announcements) → `Exit` (movement, lazy destination) → `Object` (take/drop/u
 
 - `file` (default) — one JSON file per object in `db/` (gitignored; world state is
   local). Name search shells out to `grep`.
+- `sqlite` — one row per object in a single database file (`db/azimuth.db`,
+  override with `AZIMUTH_SQLITE_PATH`), using stdlib `sqlite3` — no extra
+  dependency. Name/class lookups are indexed SQL queries instead of `grep`.
 - `marklogic` — documents in a MarkLogic database via its REST API (CTQ queries).
 
-All active objects are dumped back to storage on server shutdown and on disconnect.
+All active objects are dumped back to storage on server shutdown and on
+disconnect.
+
+An existing file world can be ported to SQLite with
+[run-migrate-sqlite.py](run-migrate-sqlite.py) (it upserts by id and never
+deletes the JSON files — re-run it any time after playing on the file backend;
+switching the server over is just `AZIMUTH_DB_TYPE=sqlite` in `.env`).
 
 ## Running
 
 ```bash
-pip install -r requirements.txt
-python run.py        # server on 0.0.0.0:5001 (uvicorn, with --reload)
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt prompt_toolkit
+.venv/bin/python run-tests.py      # verify: 28/28 passed
+.venv/bin/python run.py            # server on 0.0.0.0:5001 (uvicorn, --reload)
 ```
 
 Then connect with either client:
 
 ```bash
-python client.py     # text client (prompt_toolkit; not in requirements.txt yet)
+.venv/bin/python client.py      # plain text client
+.venv/bin/python tui_client.py  # TUI client (richer UI)
 ```
 
 or open <http://localhost:5001/> for the browser terminal.
+
+The TUI client takes an optional server URL argument
+(`.venv/bin/python tui_client.py http://mud.example:5001`) or the
+`AZIMUTH_SERVER_URL` environment variable. It shows a live status bar
+(connection phase, server URL, player name), a side panel tracking the
+current room / exits / things / inventory (parsed from `look` output), and
+lightly styled output. In-client commands (``/help /clear /connect
+/disconnect /server <url> /log [path] /quit``) and the keys Up/Down
+(history), Tab (completion), F1 (help), Ctrl+Q (quit) work offline.
+
+**Moving machines?** `db/` (world state), `.env`, and `.venv` are all gitignored —
+copy `db/` and `.env` out of band, and recreate the venv on the new box. If `db/`
+is absent, a fresh demo world is bootstrapped on first start.
 
 Log in as **wizard / wizard** to get a Programmer, or `register <username>
 <password> <email>` for a regular player. (The wizard's hash is baked in when a new
@@ -93,7 +127,8 @@ world is created; an existing `db/` will use whatever was registered there.)
 | Variable | Default | Purpose |
 |---|---|---|
 | `AZIMUTH_WORLD_ID` | `WORLD1` | World name/id |
-| `AZIMUTH_DB_TYPE` | `file` | `file` or `marklogic` |
+| `AZIMUTH_DB_TYPE` | `file` | `file`, `sqlite`, or `marklogic` |
+| `AZIMUTH_SQLITE_PATH` | `db/azimuth.db` | SQLite database file |
 | `AZIMUTH_ML_URL` | `http://localhost:8000` | MarkLogic REST endpoint |
 | `AZIMUTH_ML_USER` | `admin` | MarkLogic user |
 | `AZIMUTH_ML_PASSWORD` | — | MarkLogic password |
@@ -154,24 +189,30 @@ the in-process API and will not run. See *Known issues* below.
 
 ## Known issues
 
+- Door-state nits remain after the verb-shadowing fix (blank `lock`/`unlock`
+  replies, the `open` name collision) — see [ARCHITECTURE.md §8](ARCHITECTURE.md).
 - `run-agent.py` references methods that no longer exist on `RoomBuilderAgent`
   (`connect_to_mud`, `login`, `send_command`, …) and imports from the wrong path.
 - `run-repl.py` builds the agent but never invokes it (no `__main__` block).
-- `World.handle_login` raises `KeyError` on unknown usernames instead of replying
-  "Username and password do not match" — a bad login gets no response.
-- `prompt_toolkit` (needed by the text client) and the spaCy/bagpipes deps for the
-  parser experiment are missing from `requirements.txt`.
+- The spaCy/bagpipes deps for the parser experiment are missing from
+  `requirements.txt` (`prompt_toolkit` and `textual` for the clients are present).
 - `MlStorage` bakes its own web API path (`http://localhost:5001/data/`) into the
   MarkLogic document URIs.
+- See [ARCHITECTURE.md §8](ARCHITECTURE.md) for the rest (stub commands, the
+  grep-based name search, the reload watcher, …).
 
 ## Ongoing work
 
 - ~~Use uvicorn or other non-sucky server framework~~ — done (uvicorn + FastAPI)
-- Finish the stub commands (whisper, positioning, `Positionable.look_at`, …)
+- ~~`handle_login` KeyError on unknown usernames~~ — done (`.get()`)
+- ~~`get_commands` double-merging inherited `default_commands`~~ — done (`__dict__` guard + tests)
+- ~~Verb-shadowing dispatch bug~~ — done (`reversed(...)` dispatch + `LockableExit.__init__` chain + `lock` command)
+- ~~SQLite persistence backend~~ — done (`AZIMUTH_DB_TYPE=sqlite`; `run-migrate-sqlite.py` ports an existing file world)
+- Finish the stub commands (whisper, positioning, `Positionable.look_at`, levers)
 - Wire the spaCy parser in for robust command interpretation
-- MCP: read tools work; write actions (create/modify objects) still to come
+- Re-enable the MCP mount; add write actions (create/modify objects)
 - Clean up the agent scripts (`run-agent.py`, `run-repl.py`) around the in-process design
-- More robust persistence — Redis, Postgres, or other real databases
+- More robust persistence — Redis, Postgres, or other real databases (SQLite is in, but a server-class DB would be the next step)
 - AI agents that play, not just build
 
 ## Testing
@@ -181,8 +222,9 @@ A serverless in-process test harness runs commands directly against a `World`
 `db/` in a temp dir, so tests never touch your real world:
 
 ```bash
-python run-tests.py              # run all tests
+python run-tests.py              # run all tests (file backend)
 python run-tests.py sword        # only tests whose name contains "sword"
+python run-tests.py --db sqlite  # run the whole suite on the sqlite backend
 python run-tests.py --keep-db    # keep the temp test databases for inspection
 ```
 

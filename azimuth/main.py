@@ -1,4 +1,5 @@
 import os
+import time
 
 import dotenv
 import socketio
@@ -6,9 +7,8 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
-from fastapi_mcp import FastApiMCP
 
-from .persistence import MlStorage, SimpleFileStorage
+from .persistence import MlStorage, SimpleFileStorage, SqliteStorage
 from .world import setup_world
 
 dotenv.load_dotenv()
@@ -28,12 +28,17 @@ db_type = os.getenv("AZIMUTH_DB_TYPE", "file")
 
 if db_type == "file":
     db = SimpleFileStorage()
+elif db_type == "sqlite":
+    path = os.getenv("AZIMUTH_SQLITE_PATH", os.path.join("db", "azimuth.db"))
+    db = SqliteStorage(path)
 elif db_type == "marklogic":
     url = os.getenv("AZIMUTH_ML_URL", "http://localhost:8000")
     user = os.getenv("AZIMUTH_ML_USER", "admin")
     password = os.getenv("AZIMUTH_ML_PASSWORD")
     dbname = os.getenv("AZIMUTH_ML_DB", "azimuth")
     db = MlStorage(url, user, password, dbname)
+else:
+    raise ValueError(f"Unknown DB type: {db_type}")
 
 world = setup_world(db, world_id)
 if not world:
@@ -47,7 +52,7 @@ world.socketio = sio
 # --- Web Client ---
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html")
 
 
 # Inspect the database
@@ -84,6 +89,9 @@ async def connect(sid, environ):
 async def disconnect(sid):
     """Handles a player disconnection"""
     print(f"Client disconnected: {sid}")
+    world.oob_sids.discard(sid)
+    world._state_seq.pop(sid, None)
+    world._last_resync.pop(sid, None)
     world.on_disconnect(sid)
 
 
@@ -123,6 +131,28 @@ async def command(sid, data):
     else:
         # Process command synchronously for now
         world.process_player_command(player_id, command_text)
+        # Coalesce any state changes the command made into one `state` event
+        # per affected OOB client (OOB-PROTOCOL.md).
+        world.flush_state()
+
+
+@sio.event
+async def data(sid, body):
+    """Client out-of-band operations (OOB-PROTOCOL.md §4.2)."""
+    if not isinstance(body, dict):
+        return
+    op = body.get("op")
+    if op == "hello" and body.get("v") == 1:
+        # Tag this client as OOB-capable: it will now receive `state` events.
+        world.oob_sids.add(sid)
+    elif op == "resync":
+        now = time.monotonic()
+        if now - world._last_resync.get(sid, 0) < 1.0:
+            return  # rate-limit: ignore rapid repeats
+        world._last_resync[sid] = now
+        pid = world.active_sids.get(sid)
+        if pid is not None and pid in world.active_objects:
+            world.push_init(world.active_objects[pid])
 
 
 @app.on_event("shutdown")

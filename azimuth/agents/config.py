@@ -114,9 +114,9 @@ If there is one or more objects that a player could interact with that would log
 Do not create more than 5 objects, and only create objects that are important to the world.
 Possible object classes are:
     - Container: An object that can hold other objects such as a chest, shelf, bag or wardrobe
-    - Clothing: An object that a player could wear such as a shirt, armor, boots or a cloak
+    - WearableObject: An object that a player could wear such as a shirt, armor, boots or a cloak
     - HeldObject: An object that should be wielded or held in one or both hands, such as a weapon, wand, or holy symbol
-    - Furniture: An object that can be sat/stood/knelt/lain at, on or under, such as a chair, table or bed
+    - PositionableObject: An object that can be sat/stood/knelt/lain at, on or under, such as a chair, table or bed
     - Food: An object that can be consumed such as bread, apple, water, or a potion
     - Item: Another object that is not one of the above, such as a gem or other valuable,
 
